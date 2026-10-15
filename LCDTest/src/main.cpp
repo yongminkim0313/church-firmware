@@ -70,7 +70,11 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 #define TFT_SCK 15
 #define TFT_MOSI 16
 
-#define TFT_SPI_HZ 40000000L
+// 80MHz. 한 화면(240*240*2 = 115,200바이트)을 패널로 밀어 넣는 순수 SPI 시간이
+// 40MHz 의 23.0ms 에서 11.5ms 로 준다 — 대기화면·고리·사진이 모두 이 길을 쓴다.
+// ★ 배선이 길거나 꽂아 쓰는 점퍼선이면 이 속도에서 화면에 잡음이 섞일 수 있다.
+//   그러면 40000000L 로 되돌리면 된다(그 밖에 영향은 없다).
+#define TFT_SPI_HZ 80000000L
 #define BLK_FREQ 5000
 #define BLK_RES 8
 
@@ -80,6 +84,28 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 #define PN532_CS 12
 
 #define SCAN_TIMEOUT_MS 60  // 한 번의 스캔에 쓰는 시간. 길면 화면이 느려진다
+
+// ── 같은 카드를 두 번 세지 않기 ──────────────────────────────────
+// 올려둔 카드는 스캔마다(약 30ms 간격) 계속 읽힌다. 그 줄줄이 읽히는 것을 한 번으로
+// 묶으려면 "떠났다" 를 알아야 하는데, 떠난 것은 **안 읽히는 틈**으로만 알 수 있다.
+// NFC_GONE_MS: 이만큼 안 보였으면 카드가 리더에서 떠났다고 본다. 스캔 간격(~30ms)의
+//   여러 배로 둔다 — 올려둔 채로도 한두 번은 못 읽을 수 있어서(그때 떠난 것으로 세면
+//   가만히 있는 카드가 자꾸 다시 떠 버린다). 손으로 떼었다 대는 데는 이보다 훨씬 걸린다.
+// NFC_RETAG_MS: 센 뒤 적어도 이만큼은 같은 카드를 다시 세지 않는다. 리더 가장자리에
+//   걸친 카드는 읽혔다 안 읽혔다 깜빡이는데, 그 깜빡임마다 서버를 치고 화면을 바꾸면
+//   아이 앞에서 화면이 춤춘다. 일부러 다시 대는 데는 1초보다 더 걸리므로 막히지 않는다.
+#define NFC_GONE_MS 250
+#define NFC_RETAG_MS 1000
+
+// 대기 화면을 다시 그리는 주기. 전에는 루프마다 그려(루프가 그만큼 길어졌다) 밖에서
+// 보낸 것에 답하는 데까지 55ms 단위로 끊겼다. 고리는 1.5초에 한 바퀴라 이 정도로도
+// 충분히 매끄럽다.
+#define IDLE_FRAME_MS 100
+
+// 들고 있는 연결을 살려 두는 주기. nginx 는 한참 조용하면 끊는다(기본 75초) — 끊기면
+// 쉬었다 처음 태깅하는 아이가 핸드셰이크 값(~525ms)을 다시 치른다. 아이들은 띄엄띄엄
+// 오니 그게 보통이 된다. 서버 설정이 바뀌어도 버티게 넉넉히 짧게 둔다.
+#define HTTP_KEEPALIVE_MS 30000UL
 
 // ── 한글 폰트 ────────────────────────────────────────────────────
 // 굴림 16px 로 그린다. 한 글자가 16픽셀 칸이라 2배로 늘려도 자모가 또박또박 남는다.
@@ -141,6 +167,8 @@ static RosterRow *roster = nullptr;  // PSRAM 에 잡는다(400칸 = 약 41KB)
 static int rosterCount = 0;
 static bool rosterGotOnce = false;
 static uint32_t rosterNextAt = 0;
+// 사진을 미리 받아 둔 데까지. 이름표를 다시 받으면 0 으로 돌려 처음부터 훑는다.
+static int photoPrefetchIdx = 0;
 
 // ── 사진 캐시 (PSRAM, 가장 오래 안 쓴 것부터 밀어낸다) ───────────
 // 한 장이 240*240*2 = 115,200바이트다. 칸은 필요할 때 한 장씩 잡는다 —
@@ -212,6 +240,49 @@ static int bulkCount = 0;
 // 콜백 안에서 서버를 부르지 않는 이유: 조회·지급은 수백 ms 가 걸리는 일인데, 그동안
 // 콜백이 돌아오지 않으면 같은 소켓으로 들어온 다음 것이 밀려 라이브러리가 엉킨다.
 static char pendingUid[32] = "";
+// ★ 이 칸은 **두 일꾼이 함께 본다** — NFC 일꾼(nfcTask)이 쓰고, 본 고리(와 그 안에서
+// 도는 webSocket·hub 콜백)가 쓰고 비운다. 전에는 읽기도 loop 안에 있어 한 가닥이라
+// 아무 보호가 없었다. 자물쇠 없이 두면 한쪽이 strlcpy 로 반쯤 적어 둔 것을 다른 쪽이
+// 집어 가(잘린 UID = '등록되지 않은 키링') 어쩌다 한 번 태깅이 헛돈다.
+// 아래 세 함수로만 손을 댄다.
+static SemaphoreHandle_t uidLock;
+
+// 리더가 읽은 것이면 찍을 줄이 함께 온다 — ★ 찍는 것은 **본 고리가** 한다.
+// 일꾼에서 Serial.printf 를 부르면 그 줄이 **소리 없이 사라진다**: setTxTimeoutMs(0) 이
+// HWCDC 의 tx 자물쇠를 "안 되면 그냥 포기" 로 만들어 두는데(그 줄의 주석대로, 안 그러면
+// 기기가 2초씩 멈춘다), 본 고리가 한창 찍고 있는 참이면 일꾼 쪽 write 가 0 을 돌려주고
+// 그 줄을 버린다. 실제로 그렇게 잃었다 — 카드를 3장 읽었는데(readCount 3) 로그에는
+// [리더] 줄이 하나만 남아 있었다. 그래서 Serial 은 전처럼 한 가닥에서만 쓴다.
+static char pendingLog[72] = "";
+
+static void postPendingUid(const char *uid, const char *log = nullptr) {
+  xSemaphoreTake(uidLock, portMAX_DELAY);
+  strlcpy(pendingUid, uid, sizeof(pendingUid));
+  strlcpy(pendingLog, log ? log : "", sizeof(pendingLog));
+  xSemaphoreGive(uidLock);
+}
+
+// 담긴 것이 있으면 out 으로 옮기고 칸을 비운다(처리 중에 다음 태그가 들어와도 덮이지
+// 않게 **먼저** 비우는 것은 전과 같다).
+static bool takePendingUid(char *out, size_t n, char *log = nullptr, size_t logn = 0) {
+  xSemaphoreTake(uidLock, portMAX_DELAY);
+  const bool got = (pendingUid[0] != '\0');
+  if (got) {
+    strlcpy(out, pendingUid, n);
+    pendingUid[0] = '\0';
+    if (log && logn) strlcpy(log, pendingLog, logn);
+    pendingLog[0] = '\0';
+  }
+  xSemaphoreGive(uidLock);
+  return got;
+}
+
+static bool pendingUidWaiting() {
+  xSemaphoreTake(uidLock, portMAX_DELAY);
+  const bool got = (pendingUid[0] != '\0');
+  xSemaphoreGive(uidLock);
+  return got;
+}
 
 static bool online = false;     // 화면에 그려 둔 연결 상태
 static bool serversUp = false;  // mDNS·WebSocket 을 켰나(와이파이가 붙은 뒤 한 번만)
@@ -243,8 +314,11 @@ static int attendSeenCount = 0;
 // PN532 로 읽은 마지막 카드 — 올려둔 동안 서버를 반복해 찌르지 않으려고 기억한다
 static uint8_t heldUid[7] = {0};
 static uint8_t heldUidLen = 0;
-static uint32_t heldAt = 0;
+static uint32_t heldSeenAt = 0;   // 마지막으로 **읽힌** 때(올려둔 동안 계속 갱신된다)
+static uint32_t heldTaggedAt = 0;  // 마지막으로 **센** 때(새 태그로 받아들인 때)
 static uint32_t readCount = 0;
+// 스캔만 도는 일꾼. 들고 있는 까닭은 'i' 에서 스택 여유를 보려는 것뿐이다.
+static TaskHandle_t nfcTaskHandle = nullptr;
 
 // 지금 기분 한 벌
 struct Mood {
@@ -613,7 +687,7 @@ static void photoCacheReport() {
 }
 #endif
 
-// 사진 받아 깔기는 서버와 말하는 쪽(beginHttp·Spinner)이 아래에 있어 거기에 둔다.
+// 사진 받아 깔기는 서버와 말하는 쪽(httpSend·Spinner)이 아래에 있어 거기에 둔다.
 static bool drawPhoto(const char *img);
 
 static void drawRing(uint16_t color) {
@@ -643,8 +717,13 @@ static void spinnerTask(void *) {
     gfx->fillArc(CX, CY, R - 2, R - 7, deg, deg + 70, COL_GOLD);
     gfx->flush();
     GFX_UNLOCK();
-    deg = (deg + 15) % 360;
-    vTaskDelay(pdMS_TO_TICKS(40));
+    // 한 칸을 크게, 드물게 — 고리는 폭 5픽셀인데 flush() 는 늘 화면을 통째로
+    // (115,200바이트) 밀어 넣는다(Arduino_Canvas 에 일부만 밀어 넣는 길이 없다).
+    // 40ms 마다면 초당 2.88MB 로 SPI 를 절반 넘게 쓰는데, 바로 그때 사진을 내려받고
+    // 있다 — 고리가 자기가 기다리는 다운로드를 늦추고 있었다. 각속도는 거의 그대로
+    // 둔다(15도/40ms ≒ 36도/100ms).
+    deg = (deg + 36) % 360;
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -659,9 +738,16 @@ static void spinStop() {
 }
 
 // 서버를 부르는 함수들이 들고 다니는 고리. 함수가 어디로 돌아가도 반드시 멈춘다.
+// on 이 false 면 아무것도 하지 않는다 — 사진을 미리 받아 둘 때처럼 화면에 보일 일이
+// 없는 왕복에서는 고리를 돌리지 않는다(돌리면 대기 화면에 뜬금없이 뜬다).
 struct Spinner {
-  Spinner() { spinStart(); }
-  ~Spinner() { spinStop(); }
+  const bool on;
+  explicit Spinner(bool on_ = true) : on(on_) {
+    if (on) spinStart();
+  }
+  ~Spinner() {
+    if (on) spinStop();
+  }
 };
 
 // ── 화면들 ───────────────────────────────────────────────────────
@@ -671,7 +757,12 @@ static void statusLine(char *out, size_t cap) {
            cfgAttendMode ? (cfgAttendCard[0] ? "attend" : "attend?") : "");
 }
 
+// 다시 그릴 시각. drawIdle() 을 어디서 불러도 여기서 갱신되므로 부르는 쪽마다 따로
+// 챙기지 않아도 된다(loop 는 이 값만 본다).
+static uint32_t idleNextAt = 0;
+
 static void drawIdle() {
+  idleNextAt = millis() + IDLE_FRAME_MS;
   const float angle = fmodf(millis() / 1500.0f, 1.0f) * 360.0f;
 
   GFX_LOCK();
@@ -901,15 +992,92 @@ static void showTestScreen() {
 }
 
 // ── 서버 ─────────────────────────────────────────────────────────
-// HTTPClient 를 열어 x-talent-key 를 실어 보낸다. https 면 인증서 검사는 건너뛴다.
-static void beginHttp(HTTPClient &http, WiFiClientSecure &scli, WiFiClient &cli, const char *url) {
-  if (strncmp(TALENT_SERVER, "https", 5) == 0) {
-    scli.setInsecure();
-    http.begin(scli, url);
-  } else {
-    http.begin(cli, url);
+// 연결 **하나를 맺어 계속 쓴다**(keep-alive). 전에는 요청마다 WiFiClientSecure 를
+// 부르는 함수의 스택에 두어, 함수가 끝나면 연결이 소멸하고 다음 요청이 또 처음부터
+// 맺었다. 그 고정비(DNS+TCP+TLS)를 재 보니 **본문 크기와 무관하게 늘 ~525ms** 였다
+// (조회·이름표·사진이 모두 같았다. 같은 공유기에서 맥으로 재면 37ms 다 — 서버가 느린
+// 것이 아니라 핸드셰이크 값이다). 태깅 한 번에 조회와 사진으로 두 번 치러 1.33초 중
+// 1초가 여기였다. 치는 곳은 TALENT_SERVER 하나뿐이라 연결을 들고 있으면 핸드셰이크는
+// 처음 한 번뿐이다.
+//
+// ★ 객체가 하나뿐이라 **겹쳐 쓸 수 없다** — 한 요청을 http.end() 로 끝맺은 뒤에 다음을
+//   부른다. 지금 서버를 부르는 자리는 모두 차례로 돈다(조회 → 사진, 설정, 이름표, 지급).
+static WiFiClientSecure httpsCli;
+static WiFiClient httpPlainCli;
+static HTTPClient http;
+static bool httpInsecureSet = false;
+static uint32_t httpWarmAt = 0;
+
+static bool talentSsl() { return strncmp(TALENT_SERVER, "https", 5) == 0; }
+
+// 들고 있던 연결을 정말 끊는다. setReuse(false) 라야 end() 가 소켓을 닫는다.
+static void httpDrop() {
+  http.setReuse(false);
+  http.end();
+  http.setReuse(true);
+  httpsCli.stop();
+  httpPlainCli.stop();
+}
+
+// 요청 하나를 보낸다. body 가 nullptr 이면 GET, 아니면 JSON POST(method 로 따로 적으면
+// 그것으로 보낸다). 돌려주는 값은 HTTP 코드이고 음수면 보내지 못한 것이다.
+// 본문·스트림은 부른 쪽에서 읽고 **부른 쪽이 http.end() 를 부른다** — 여기서 끝맺으면
+// 아직 읽지 않은 스트림이 닫혀 버린다.
+//
+// retry: 들고 있는 연결을 서버가 조용히 닫는 일이 있다(keep-alive 시간이 지나면 끊는다).
+//   그러면 보내기는 되지만 답이 오지 않는다 — 그때 한 번만 새로 맺어 다시 물어본다.
+//   이 되살리기가 없으면 한참 조용했다가 태깅할 때 첫 요청이 늘 실패한다.
+//   ★ 다만 **또 보내면 안 되는 요청에는 쓰지 않는다**(지급 POST). 서버가 받아서 처리한
+//     뒤에 답만 못 온 경우를 가릴 길이 없어, 다시 보내면 포인트를 두 번 줄 수 있다.
+static int httpSend(const char *url, const char *body, const char *method, bool retry) {
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (talentSsl()) {
+      if (!httpInsecureSet) {  // 인증서 검사는 건너뛴다(기기 키로 가린다) — 한 번만 켜면 된다
+        httpsCli.setInsecure();
+        httpInsecureSet = true;
+      }
+      http.begin(httpsCli, url);
+    } else {
+      http.begin(httpPlainCli, url);
+    }
+    http.setReuse(true);  // ★ 이것이 end() 에서 소켓을 살려 두게 한다
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    // begin() 이 요청 헤더를 비우므로 헤더는 늘 여기서 다시 얹는다(겹쳐 쌓이지 않는다).
+    http.addHeader("x-talent-key", TALENT_DEVICE_KEY);
+    if (body) http.addHeader("Content-Type", "application/json");
+
+    const char *verb = method ? method : (body ? "POST" : "GET");
+    const int code = http.sendRequest(verb, (uint8_t *)body, body ? strlen(body) : 0);
+    if (code > 0) {
+      httpWarmAt = millis() + HTTP_KEEPALIVE_MS;  // 방금 썼으니 한동안 찌를 필요가 없다
+      return code;
+    }
+
+    http.end();
+    if (attempt == 0 && retry) {
+      Serial.printf("[서버] 들고 있던 연결이 닫혀 있었다(code=%d) — 새로 맺는다\n", code);
+      httpDrop();
+      continue;
+    }
+    return code;
   }
-  http.addHeader("x-talent-key", TALENT_DEVICE_KEY);
+  return -1;
+}
+
+static int httpGet(const char *url) { return httpSend(url, nullptr, nullptr, true); }
+static int httpPost(const char *url, const char *body, bool retry) {
+  return httpSend(url, body, nullptr, retry);
+}
+
+// 연결을 살려 두려고 **본문 없는 HEAD** 를 한 번 보낸다. 답이 무엇이든 상관없다 —
+// 목적은 소켓을 깨워 두는 것뿐이다(실패하면 다음 요청이 새로 맺는다).
+static void httpWarm() {
+  httpWarmAt = millis() + HTTP_KEEPALIVE_MS;
+  if (WiFi.status() != WL_CONNECTED) return;
+  char url[192];
+  snprintf(url, sizeof(url), "%s/api/talent/config/v2?device=%s", TALENT_SERVER, TALENT_DEVICE_ID);
+  httpSend(url, nullptr, "HEAD", true);
+  http.end();
 }
 
 // ── 사진 한 장 받아 화면 버퍼에 깔기 ────────────────────────────
@@ -919,20 +1087,22 @@ static void beginHttp(HTTPClient &http, WiFiClientSecure &scli, WiFiClient &cli,
 //
 // 한 줄씩 흘려 읽는다 — 480 짜리 한 장은 460KB 라 통째로 받아 둘 자리가 없다(heap 은
 // 250KB 남짓이다). 한 줄(960바이트)만 들고 바로 화면 버퍼에 옮긴다.
-static bool drawPhoto(const char *img) {
+// draw 가 false 면 **화면에 깔지 않고 캐시에만 담는다** — 미리 받아 두는 길(loop 의
+// 선캐싱)이 이것을 쓴다. 그때는 고리도 돌리지 않는다.
+static bool loadPhoto(const char *img, bool draw) {
 #if !PHOTO_ENABLE
   return false;
 #else
   if (!img || !img[0]) return false;
-  uint16_t *fb = gfx->getFramebuffer();
-  if (!fb) return false;
+  uint16_t *fb = draw ? gfx->getFramebuffer() : nullptr;
+  if (draw && !fb) return false;
 
 #if PHOTO_CACHE_MAX > 0
   // 1) 들고 있는 사진이면 내려받지 않는다 — 와이파이가 끊겨 있어도 뜬다.
   const uint16_t *hit = photoCacheGet(img);
   if (hit) {
     photoHit++;
-    blitPhoto(hit, 240);
+    if (draw) blitPhoto(hit, 240);
     return true;
   }
   photoMiss++;
@@ -940,18 +1110,13 @@ static bool drawPhoto(const char *img) {
 
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  Spinner spin;  // 받는 동안(1초쯤) 테두리에 금색 고리가 돈다
+  Spinner spin(draw);  // 받는 동안 테두리에 금색 고리가 돈다(미리 받을 때는 돌리지 않는다)
 
   char url[220];
   snprintf(url, sizeof(url), "%s/api/talent/photo/device/%s", TALENT_SERVER, img);
 
-  HTTPClient http;
-  WiFiClientSecure scli;
-  WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.setTimeout(HTTP_TIMEOUT_MS);
   const uint32_t t0 = millis();
-  const int code = http.GET();
+  const int code = httpGet(url);
   if (code != HTTP_CODE_OK) {
     http.end();
     Serial.printf("[사진] 실패 code=%d (%s)\n", code, img);
@@ -1003,6 +1168,12 @@ static bool drawPhoto(const char *img) {
 #if PHOTO_CACHE_MAX > 0
   slot = photoCacheClaim(img);
 #endif
+  // 미리 받아 두는 길은 담을 칸이 있어야 뜻이 있다 — 칸을 못 얻었으면 접는다
+  // (화면에 깔 일이 없으니 받아도 버릴 뿐이다).
+  if (!draw && !slot) {
+    http.end();
+    return false;
+  }
 
   static uint16_t rowBuf[TALENT_PX];  // 원본 한 줄 (240이면 480바이트)
   int rows = 0;
@@ -1014,7 +1185,7 @@ static bool drawPhoto(const char *img) {
       // 받은 줄까지는 보여 주지만, 캐시 칸은 못 쓰게 한다 — 반쪽 사진을
       // 들고 있다가 다음 태깅에 그대로 내보내면 그 아이는 계속 반쪽만 본다.
       if (slot) {
-        blitPhoto(slot, rows);
+        if (draw) blitPhoto(slot, rows);
         photoCacheDrop(slot);
       }
       return rows > 0;
@@ -1047,13 +1218,15 @@ static bool drawPhoto(const char *img) {
       photoCacheDrop(slot);
     }
 #endif
-    blitPhoto(slot, rows);
+    if (draw) blitPhoto(slot, rows);
   }
-  Serial.printf("[사진] %s 깔았다 (%d줄, %d바이트, %lums)\n", img, rows, expect,
-                (unsigned long)(millis() - t0));
+  Serial.printf("[사진] %s %s (%d줄, %d바이트, %lums)\n", img, draw ? "깔았다" : "미리 받았다",
+                rows, expect, (unsigned long)(millis() - t0));
   return rows > 0;
 #endif
 }
+
+static bool drawPhoto(const char *img) { return loadPhoto(img, true); }
 
 // TALENT_SERVER("https://host[:port]") 에서 호스트·포트·ssl 을 떼어 낸다.
 static bool hubTarget(char *host, size_t cap, uint16_t *port, bool *ssl) {
@@ -1092,12 +1265,7 @@ static void fetchConfig() {
   char url[192];
   snprintf(url, sizeof(url), "%s/api/talent/config/v2?device=%s", TALENT_SERVER, TALENT_DEVICE_ID);
 
-  HTTPClient http;
-  WiFiClientSecure scli;
-  WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  const int code = http.GET();
+  const int code = httpGet(url);
   if (code != HTTP_CODE_OK) {
     http.end();
     Serial.printf("[설정] 받기 실패 code=%d\n", code);
@@ -1155,13 +1323,8 @@ static bool fetchRoster() {
   char url[160];
   snprintf(url, sizeof(url), "%s/api/talent/roster?px=%d", TALENT_SERVER, TALENT_PX);
 
-  HTTPClient http;
-  WiFiClientSecure scli;
-  WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.setTimeout(HTTP_TIMEOUT_MS);
   const uint32_t t0 = millis();
-  const int code = http.GET();
+  const int code = httpGet(url);
   if (code != HTTP_CODE_OK) {
     http.end();
     Serial.printf("[이름표] 받기 실패 code=%d\n", code);
@@ -1208,6 +1371,7 @@ static bool fetchRoster() {
   }
   rosterCount = n;
   rosterGotOnce = true;
+  photoPrefetchIdx = 0;  // 이름표가 바뀌었으니 사진을 처음부터 다시 훑는다
   Serial.printf("[이름표] 사진 있는 아이 %d명%s (px %d, %lums)\n", rosterCount,
                 whole ? "" : " (칸이 모자라 일부만)", TALENT_PX,
                 (unsigned long)(millis() - t0));
@@ -1225,13 +1389,8 @@ static bool lookupTalent(const char *uid, char *name, size_t nameCap, long *poin
   char url[192];
   snprintf(url, sizeof(url), "%s/api/talent/feed?uid=%s&limit=0", TALENT_SERVER, uid);
 
-  HTTPClient http;
-  WiFiClientSecure scli;
-  WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.setTimeout(HTTP_TIMEOUT_MS);
   const uint32_t t0 = millis();
-  const int code = http.GET();
+  const int code = httpGet(url);
   if (code != HTTP_CODE_OK) {
     http.end();
     Serial.printf("[서버] 조회 실패 code=%d\n", code);
@@ -1272,13 +1431,10 @@ static bool attendEarn(const char *uid, char *name, size_t nameCap, long *points
   snprintf(payload, sizeof(payload), "{\"uid\":\"%s\",\"card\":\"%s\",\"device\":\"%s\"}", uid,
            cfgAttendCard, TALENT_DEVICE_ID);
 
-  HTTPClient http;
-  WiFiClientSecure scli;
-  WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  const int code = http.POST((uint8_t *)payload, strlen(payload));
+  // ★ retry 를 끈다 — 서버가 받아 포인트를 준 뒤에 답만 못 온 경우를 가릴 길이 없어,
+  //   다시 보내면 두 번 줄 수 있다. 실패하면 processTag 가 조회로 넘어가고(그때 연결이
+  //   되살아난다) 아이가 한 번 더 대면 된다.
+  const int code = httpPost(url, payload, false);
   String body = http.getString();
   http.end();
   if (code != HTTP_CODE_OK) {
@@ -1315,13 +1471,8 @@ static void reportSeen(const char *uid) {
   char payload[128];
   snprintf(payload, sizeof(payload), "{\"uid\":\"%s\",\"device\":\"%s\"}", uid, TALENT_DEVICE_ID);
 
-  HTTPClient http;
-  WiFiClientSecure scli;
-  WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  const int code = http.POST((uint8_t *)payload, strlen(payload));
+  // 같은 UID 를 또 알려도 '미등록카드' 에 한 줄로 남을 뿐이라 다시 보내도 괜찮다.
+  const int code = httpPost(url, payload, true);
   http.end();
   Serial.printf("[미등록] %s 알림 (code=%d)\n", uid, code);
 }
@@ -1451,7 +1602,7 @@ static void handleCommand(const char *text, size_t len) {
         showNfc(uid, doc["name"] | "", doc["points"] | 0L, true, doc["note"] | "", &m);
         return;
       }
-      strlcpy(pendingUid, uid, sizeof(pendingUid));  // 서버 왕복은 loop 에서
+      postPendingUid(uid);  // 서버 왕복은 loop 에서
       return;
     }
     if (doc["enabled"].is<bool>()) {
@@ -1659,20 +1810,33 @@ static void probePin(uint8_t pin, const char *name) {
 // ── PN532 읽기 ───────────────────────────────────────────────────
 // 올려둔 동안 서버를 반복해 찌르지 않는다 — 같은 UID 가 NFC_SHOW_MS 안에 또 읽히면
 // 새 태그로 보지 않는다.
-static void nfcService() {
+// ★ 이 함수와 nfc(Adafruit_PN532) · heldUid/heldUidLen/heldSeenAt/heldTaggedAt 은
+//   **nfcTask 만** 만진다.
+//   라이브러리가 thread-safe 가 아니라, 다른 곳에서 nfc 를 부르면 같은 SPI 주고받기가
+//   서로 섞여 엉뚱한 응답을 읽는다.
+static void nfcScanOnce() {
   uint8_t uid[7] = {0};
   uint8_t uidLen = 0;
 
   if (!nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen, SCAN_TIMEOUT_MS)) return;
   if (uidLen == 0 || uidLen > sizeof(uid)) return;
 
+  const uint32_t now = millis();
   const bool sameCard = (uidLen == heldUidLen) && (memcmp(uid, heldUid, uidLen) == 0);
-  const bool stillHeld = sameCard && (millis() - heldAt < NFC_SHOW_MS);
+  // 그 사이 안 읽힌 틈이 있었나 — 있었으면 떼었다 다시 댄 것이다.
+  const bool wasGone = (now - heldSeenAt) >= NFC_GONE_MS;
+  // 올려둔 채로 줄줄이 읽히는 것(틈이 없다)과, 센 지 얼마 안 된 깜빡임은 세지 않는다.
+  // ★ 전에는 '같은 카드이고 마지막으로 **읽힌** 지 6초 안이면 넘긴다' 였는데, 읽힐
+  //   때마다 그 6초가 다시 시작돼서(heldAt 을 늘 갱신한다) **5초마다 다시 대면 처음
+  //   한 번 말고는 영원히 세지 않았다**. 실제로 스무 번을 댔는데 세 번만 셌다.
+  //   "읽힌 지" 가 아니라 "떠났다 왔나" 로 보는 것이 묶으려던 바로 그것이다.
+  const bool stillHeld = sameCard && (!wasGone || (now - heldTaggedAt) < NFC_RETAG_MS);
 
   memcpy(heldUid, uid, uidLen);
   heldUidLen = uidLen;
-  heldAt = millis();
+  heldSeenAt = now;
   if (stillHeld) return;
+  heldTaggedAt = now;
 
   readCount++;
   char hex[24] = "";
@@ -1681,8 +1845,27 @@ static void nfcService() {
     snprintf(b, sizeof(b), "%02X", uid[i]);
     strlcat(hex, b, sizeof(hex));
   }
-  Serial.printf("[리더] card #%lu  UID %s (%d bytes)\n", (unsigned long)readCount, hex, uidLen);
-  strlcpy(pendingUid, hex, sizeof(pendingUid));  // 서버 왕복은 loop 에서
+  // 찍는 것은 본 고리에 맡긴다(postPendingUid 의 주석 — 여기서 찍으면 줄이 사라진다).
+  char log[72];
+  snprintf(log, sizeof(log), "[리더] card #%lu  UID %s (%d bytes)", (unsigned long)readCount, hex,
+           uidLen);
+  postPendingUid(hex, log);  // 찍기·서버 왕복은 loop 에서
+}
+
+// 카드 스캔만 도는 일꾼. 전에는 이것을 loop 맨 앞에서 불렀는데, 읽기는 **멈춰 서서
+// 기다리는 일**이라 카드가 없어도 한 바퀴에 SCAN_TIMEOUT_MS(60ms)를 거기서 썼다 —
+// 그래서 밖에서 ws 로 보낸 것에 답하는 시간이 그 60ms 단위로 끊겼다(실측 median 58ms ·
+// 최소 50ms). 시간을 줄이면 카드를 놓치므로(상수 주석대로 일부러 둔 값이다) 줄이는
+// 대신 일을 옆으로 뺐다. 디스플레이는 FSPI · PN532 는 HSPI 로 버스가 갈려 있어 이
+// 일꾼과 본 고리가 SPI 를 다투지 않는다.
+// Core 0 에 둔다 — Arduino 의 loop 는 Core 1 이라 둘이 서로 밀지 않는다.
+static void nfcTask(void *) {
+  for (;;) {
+    nfcScanOnce();
+    // 읽기 안에 delay(10) 가 있어 이미 자리를 내주지만, 한 바퀴에 적어도 한 번은
+    // 반드시 내주게 둔다 — Core 0 의 idle 이 못 돌면 태스크 워치독이 짖는다.
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
 }
 
 // ── 버튼 (터치 대신) ────────────────────────────────────────────
@@ -1713,6 +1896,16 @@ static void buttonService() {
 
 void setup() {
   Serial.begin(115200);
+  // ★ 시리얼 쓰기를 기다리지 않게 한다 — 이것이 없으면 **기기가 2초씩 멈춘다**.
+  // 이 보드는 내장 USB-Serial/JTAG 로 Serial 을 낸다(ARDUINO_USB_CDC_ON_BOOT=1).
+  // USB 가 컴퓨터에 꽂혀 있는데 그 글자를 읽어 주는 프로그램이 없으면(모니터를 띄우지
+  // 않고 전원만 쓰려고 꽂아 둔 경우) 호스트 쪽 버퍼가 차고, 그 뒤로는 Serial.printf 가
+  // 한 줄마다 멈춰 선다 — HWCDC 는 tx_timeout_ms(기본 100ms) 를 스무 번까지 기다려
+  // **한 줄에 약 2초**다. 태깅 한 번에 여러 줄을 찍으니 기기가 쓸 수 없게 된다.
+  // (ws 왕복으로 재서 찾았다: 시리얼을 읽는 동안은 58ms, 안 읽으면 25번 중 18번이 2초.)
+  // 0 으로 두면 기다리지 않고 그 줄을 버린다 — 모니터를 띄워 두면 호스트가 계속
+  // 비워 주므로 버려지는 줄은 없다. 벽돌 충전기만 꽂은 경우는 원래 영향이 없다.
+  Serial.setTxTimeoutMs(0);
   delay(2000);  // USB CDC 가 올라올 때까지 대기
 
   Serial.println();
@@ -1724,6 +1917,7 @@ void setup() {
   Serial.printf("Server : %s · device %s\n", TALENT_SERVER, TALENT_DEVICE_ID);
 
   gfxLock = xSemaphoreCreateMutex();
+  uidLock = xSemaphoreCreateMutex();
   pinMode(BTN_PIN, INPUT_PULLUP);
 
 #if PHOTO_ENABLE
@@ -1802,6 +1996,9 @@ void setup() {
   nfc.SAMConfig();
   nfc.setPassiveActivationRetries(1);  // 카드가 없을 때 빨리 포기하도록
 
+  // 카드 스캔은 전용 일꾼에게 맡긴다(위 nfcTask 주석). 반드시 PN532 가 선 뒤에 올린다.
+  xTaskCreatePinnedToCore(nfcTask, "nfc", 4096, nullptr, 1, &nfcTaskHandle, 0);
+
   // 와이파이가 NVS 에 쓰지 않게 막는다 — 플래시에 쓰는 동안 캐시가 꺼져 화면·SPI 가
   // 늘어진다(참고 기기에서는 RGB 패널 그림이 쓸렸다).
   WiFi.persistent(false);
@@ -1812,7 +2009,7 @@ void setup() {
 }
 
 void loop() {
-  nfcService();   // 이 보드에 붙은 리더가 읽은 것
+  // 카드 스캔은 여기 없다 — 전용 일꾼(nfcTask)이 돈다. 읽은 UID 는 pendingUid 로 넘어온다.
   wifiService();  // 와이파이 — 붙어 있으면 아무 일도 하지 않는다
 
   // 붙거나 끊기는 순간에만 다시 그린다(매번 그리면 화면이 깜빡인다)
@@ -1836,10 +2033,10 @@ void loop() {
   if (hubBegun) hub.loop();         // 다시 붙기·heartbeat 가 여기서 돈다
 
   // 넘어온 태그 — 조회·지급은 수백 ms 가 걸려 콜백 밖(여기)에서 한다
-  if (pendingUid[0]) {
-    char uid[32];
-    strlcpy(uid, pendingUid, sizeof(uid));
-    pendingUid[0] = '\0';  // 처리 중에 다음 태그가 들어와도 덮이지 않게 먼저 비운다
+  char uid[32];
+  char uidLog[72];
+  if (takePendingUid(uid, sizeof(uid), uidLog, sizeof(uidLog))) {
+    if (uidLog[0]) Serial.println(uidLog);  // 리더가 읽은 줄 — 찍는 자리는 여기뿐이다
     processTag(uid);
   }
 
@@ -1892,6 +2089,11 @@ void loop() {
                       serversUp ? webSocket.connectedClients() : 0,
                       online ? WiFi.localIP().toString().c_str() : "끊김",
                       (unsigned long)readCount, (unsigned long)ESP.getFreeHeap());
+        // 일꾼 스택에서 **한 번도 안 쓰고 남은** 바이트. 0 에 가까우면 넓혀야 한다.
+        Serial.printf("[상태] nfc 일꾼 스택 여유 %u bytes (잡은 것 4096)\n",
+                      nfcTaskHandle ? (unsigned)(uxTaskGetStackHighWaterMark(nfcTaskHandle) *
+                                                 sizeof(StackType_t))
+                                    : 0u);
         break;
       case 'f':
       case 'F':
@@ -1966,6 +2168,24 @@ void loop() {
   // NFC·일괄 화면은 얼마 뒤 자동으로 대기 화면으로 돌아간다
   if ((mode == MODE_NFC || mode == MODE_BULK) && (int32_t)(millis() - nfcUntil) >= 0) goIdle();
 
-  // 대기 화면은 고리가 돌아야 해서 계속 다시 그린다
-  if (mode == MODE_IDLE) drawIdle();
+  // 들고 있는 연결이 녹슬지 않게 조용히 한 번 찌른다 — 대기 화면일 때만.
+  if (online && mode == MODE_IDLE && (int32_t)(millis() - httpWarmAt) >= 0) httpWarm();
+
+#if PHOTO_CACHE_MAX > 0
+  // 사진 미리 받아 두기 — 이름표를 받은 뒤 한 장씩 캐시에 채운다. 태깅할 때 받으면 그
+  // 아이가 사진을 기다리지만(재 보니 ~800ms), 미리 받아 두면 캐시에서 바로 깔린다.
+  // 아이가 열 명인데 캐시가 60칸이라 전원이 들어간다.
+  // ★ 대기 화면일 때 한 번에 한 장만 — 받는 동안 loop 가 멈추므로 길게 붙잡지 않는다.
+  if (online && mode == MODE_IDLE && !pendingUidWaiting() && photoPrefetchIdx < rosterCount) {
+    const int i = photoPrefetchIdx++;
+    if (!photoCacheGet(roster[i].img)) loadPhoto(roster[i].img, false);
+    if (photoPrefetchIdx >= rosterCount) Serial.printf("[사진] 미리 받기 끝 (%d명)\n", rosterCount);
+  }
+#endif
+
+  // 대기 화면은 고리가 돌아야 해서 다시 그린다 — 다만 **프레임을 제한한다**.
+  // 전에는 루프마다 그렸다. drawIdle() 은 화면을 통째로 다시 그리고 115,200바이트를
+  // 패널로 밀어 넣어 그만큼 루프가 길어졌다(그래서 밖에서 보낸 것에 답하는 데까지
+  // 55ms 단위로 끊겼다).
+  if (mode == MODE_IDLE && (int32_t)(millis() - idleNextAt) >= 0) drawIdle();
 }
