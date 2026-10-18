@@ -510,9 +510,22 @@ static void espnowBegin() {
   Serial.printf("[라디오] ESP-NOW 켜짐 — 내 MAC %s · 채널 %u (리더가 이 채널을 찾아온다)\n",
                 WiFi.macAddress().c_str(), ch);
 }
+// 라디오를 내린다 — 와이파이 드라이버를 껐다 켜면 ESP-NOW 도 함께 내려가므로,
+// 껐다 켜기 전에 이쪽도 가지런히 내려 둔다. 짝(리더 MAC)도 함께 잊는다:
+// 드라이버가 새로 올라오면 짝 목록이 비어 있어, 들고 있던 MAC 으로 보내도 가지 않는다.
+// 리더가 다시 부르면 그때 다시 배운다(espnowRecv).
+static void espnowEnd() {
+  if (!espnowUp) return;
+  esp_now_deinit();
+  espnowUp          = false;
+  readerKnown       = false;
+  readerPeerPending = false;
+  espnowAliveUntil  = 0;
+}
 #else
 static bool espnowAlive() { return false; }
 static void espnowBegin() {}
+static void espnowEnd() {}
 #endif
 
 static bool online    = false;   // 화면에 그려 둔 연결 상태(아이콘이 떠 있나)
@@ -2100,50 +2113,167 @@ static const WifiAp WIFI_APS[] = {
 };
 static const int WIFI_AP_COUNT = sizeof(WIFI_APS) / sizeof(WIFI_APS[0]);
 
-// 한 순위에 이만큼 붙어 보고 안 되면 다음 순위로. 부팅 직후 첫 시도는 스캔부터 하느라
-// 느려서 8초로는 붙을 수 있는 AP 도 놓쳤다 — 넉넉히 준다.
-static const uint32_t WIFI_TRY_MS    = 15000;
-// disconnect() 는 STA 가 실제로 빠지기 전에 돌아온다. 곧바로 begin() 을 부르면
-// "sta is connecting, cannot set config" 로 거부되어 그 순위는 시도조차 못 하고 넘어간다.
-// 그래서 끊기를 건 뒤 이만큼 틈을 두고 begin() 한다(기다리는 동안에도 loop 는 돈다).
-static const uint32_t WIFI_SETTLE_MS = 300;
-static const int      WIFI_SETTLE_MAX = 10;   // 그래도 거부되면 이만큼까지만 다시 걸어 본다
+// ── 둘러보고 나서 건다 (2026-10-18) ───────────────────────────────
+// 처음에는 목록의 네 곳을 차례로 begin() 해 봤다. 그런데 **없는 AP 에 걸어 보는
+// 것이 모든 말썽의 뿌리**였다. 코어의 disconnect() 는 붙어 있던 것이 떨어지기만
+// 기다리므로(STA.cpp: connected() 가 거짓이면 즉시 반환) 한 번도 못 붙은 자리에서는
+// 곧바로 돌아오고, IDF 는 아직 connecting 이다. 그 위에 begin() 이
+// esp_wifi_set_config 를 걸면 "sta is connecting, cannot set config"
+// (ESP_ERR_WIFI_STATE) 로 거부된다.
+//
+// ★ DISCONNECTED 이벤트를 기다려도 소용없다 — 실기에서 확인했다. 그 이벤트는 한
+//   번의 붙어 보기가 끝났다는 뜻일 뿐이고, IDF 는 그 뒤에도 connecting 으로 남아
+//   있어 바로 건 begin() 이 또 거부된다. 이벤트를 "이제 걸어도 된다" 는 신호로
+//   삼았던 판은 틀렸다.
+//
+// 그래서 **먼저 둘러본다**(스캔). 눈에 보이는 AP 중에서 목록에서 가장 앞선 것
+// 하나만 고르고, 끊기를 건 뒤 넉넉히 틈을 두고 begin() 을 **한 번** 건다. 없는
+// 곳에는 아예 걸지 않으니 거부가 생길 일이 거의 없다.
+//
+// ★ 아는 AP 가 하나도 안 보이면 **라디오를 가만히 둔다.** 둘러보는 동안에도
+//   채널이 움직여 리더의 ESP-NOW 가 흔들리므로, 헛걸음이 거듭될수록 쉬는 시간을
+//   늘린다(15초 → 두 배씩 → 최대 2분). 공유기를 못 찾는 자리에서 태깅만이라도
+//   살아 있게 하려는 것이다 — 채널이 가만히 있어야 리더가 자리를 잡는다.
+static const uint32_t WIFI_TRY_MS     = 15000;   // 한 번 걸어 보고 이만큼 기다린다
+static const uint32_t WIFI_SETTLE_MS  = 1000;    // 끊기를 건 뒤 begin() 까지 두는 틈
+static const uint32_t WIFI_REST_MIN_MS = 15000;  // 헛걸음 뒤 다시 둘러보기까지
+static const uint32_t WIFI_REST_MAX_MS = 120000; // 거듭되면 여기까지 늘린다
+static const uint32_t WIFI_SCAN_MAX_MS = 12000;  // 스캔이 이만큼 넘게 안 끝나면 접는다
+static const int      WIFI_REJECT_MAX  = 8;      // 거부가 이어서 이만큼이면 라디오를 껐다 켠다
+// 라디오를 껐다 켜도 안 풀릴 때 보드를 다시 세운다. 다만 **부팅 직후에는 하지
+// 않는다** — 그랬다가 20초마다 다시 세우는 맴돌이에 빠진 적이 있다(실기).
+static const int      WIFI_RADIO_RESET_MAX = 3;
+static const uint32_t WIFI_REBOOT_AFTER_MS = 300000;   // 켠 지 5분은 지나야 다시 세운다
 
-static int      wifiIdx    = 0;             // 지금 시도 중인 순위(0 부터)
-static uint32_t wifiTryAt  = 0;
-static bool     wifiTried  = false;
-static bool     wifiParked = false;         // 끊기는 걸었고 begin() 을 기다리는 중
-static uint32_t wifiParkAt = 0;
-static int      wifiParkTries = 0;
+enum WifiPhase : uint8_t { WP_REST, WP_SCAN, WP_SETTLE, WP_CONNECT };
+static WifiPhase wifiPhase   = WP_REST;
+static uint32_t  wifiPhaseAt = 0;
+static uint32_t  wifiRestMs  = WIFI_REST_MIN_MS;
+static int       wifiPick    = -1;      // 스캔에서 고른 순위(-1 = 아직 없음)
+static int       wifiRejects = 0;       // 이어서 거부된 횟수
+static int       wifiRadioResets = 0;   // 라디오를 껐다 켠 횟수(붙으면 0 으로)
+static volatile bool wifiStaBusy = false;   // begin() 뒤 결판을 기다린다(이벤트가 내린다)
+
+// 붙어 보기의 결판이 여기로 온다. **와이파이 일꾼 위에서** 불리므로 깃발만 내린다.
+// 이것은 "걸어도 된다" 는 신호가 아니라 "이번 붙어 보기는 끝났다" 는 신호다 —
+// 15초를 다 기다리지 않고 다음 바퀴로 넘어가는 데만 쓴다(까닭은 위 머리말에).
+static void onWifiEvent(WiFiEvent_t ev) {
+  switch (ev) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+    case ARDUINO_EVENT_WIFI_STA_STOP:
+      wifiStaBusy = false;
+      break;
+    default: break;
+  }
+}
+
+static void wifiRest() {                 // 한 바퀴 헛걸음 — 쉬러 간다
+  wifiPhase   = WP_REST;
+  wifiPhaseAt = millis();
+}
+
+// 라디오를 껐다 켠다 — IDF 가 connecting 에서 끝내 나오지 못할 때의 마지막 수단.
+// 드라이버를 내리면 ESP-NOW 도 함께 내려가므로 내렸다가 다시 세운다.
+static void wifiRadioReset() {
+  wifiRadioResets++;
+  Serial.printf("[와이파이] 라디오가 엉켰다 — 껐다 켠다 (%d/%d)\n",
+                wifiRadioResets, WIFI_RADIO_RESET_MAX);
+  if (wifiRadioResets > WIFI_RADIO_RESET_MAX && millis() > WIFI_REBOOT_AFTER_MS) {
+    Serial.println("[와이파이] 그래도 안 풀린다 — 보드를 다시 세운다");
+    Serial.flush();
+    ESP.restart();
+  }
+  WiFi.scanDelete();
+  espnowEnd();                     // 드라이버가 내려가기 전에 가지런히
+  WiFi.disconnect(true, false);    // true = 드라이버까지 내린다
+  WiFi.mode(WIFI_OFF);
+  delay(200);                      // 내려가는 틈(delay 는 쉬는 것이라 그동안 일꾼이 돈다)
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  espnowBegin();                   // 드라이버가 새로 올라왔으니 라디오도 다시
+  wifiStaBusy = false;
+  wifiRejects = 0;
+  wifiRest();
+}
 
 static void wifiService() {
-  if (WiFi.status() == WL_CONNECTED) { wifiParked = false; wifiParkTries = 0; return; }
-
-  if (wifiParked) {                                              // 틈을 둔 뒤 실제로 건다
-    if (millis() - wifiParkAt < WIFI_SETTLE_MS) return;
-    if (WiFi.begin(WIFI_APS[wifiIdx].ssid, WIFI_APS[wifiIdx].pass) == WL_CONNECT_FAILED
-        && wifiParkTries < WIFI_SETTLE_MAX) {
-      wifiParkTries++;                                           // 아직 안 빠졌다 — 틈을 더 주고 다시
-      wifiParkAt = millis();
-      return;
-    }
-    wifiParked    = false;
-    wifiParkTries = 0;
-    wifiTryAt     = millis();
-    wifiTried     = true;
-    Serial.printf("[와이파이] %d순위 '%s' 에 붙어 보는 중\n", wifiIdx + 1, WIFI_APS[wifiIdx].ssid);
+  if (WiFi.status() == WL_CONNECTED) {      // 붙었다 — 셈을 모두 처음으로
+    wifiStaBusy     = false;
+    wifiRejects     = 0;
+    wifiRadioResets = 0;
+    wifiRestMs      = WIFI_REST_MIN_MS;
+    wifiPhase       = WP_REST;
+    wifiPhaseAt     = millis();
     return;
   }
 
-  if (wifiTried && millis() - wifiTryAt < WIFI_TRY_MS) return;   // 지금 순위에 붙는 중 — 더 기다린다
+  switch (wifiPhase) {
+    case WP_REST:
+      if (wifiPhaseAt && millis() - wifiPhaseAt < wifiRestMs) return;
+      // 이번 쉬는 시간은 다 썼다 — 다음 헛걸음은 더 길게 쉰다(최대 WIFI_REST_MAX_MS)
+      wifiRestMs = (wifiRestMs * 2 > WIFI_REST_MAX_MS) ? WIFI_REST_MAX_MS : wifiRestMs * 2;
+      WiFi.scanDelete();
+      if (WiFi.scanNetworks(true) == WIFI_SCAN_FAILED) { wifiRest(); return; }
+      wifiPhase   = WP_SCAN;
+      wifiPhaseAt = millis();
+      return;
 
-  if (wifiTried) wifiIdx = (wifiIdx + 1) % WIFI_AP_COUNT;        // 실패 → 다음 순위(끝이면 처음으로)
-  WiFi.disconnect();
-  wifiParkAt    = millis();
-  wifiParked    = true;
-  wifiParkTries = 0;
+    case WP_SCAN: {
+      const int16_t n = WiFi.scanComplete();
+      if (n == WIFI_SCAN_RUNNING) {
+        if (millis() - wifiPhaseAt >= WIFI_SCAN_MAX_MS) { WiFi.scanDelete(); wifiRest(); }
+        return;                                   // 아직 둘러보는 중
+      }
+      if (n < 0) { WiFi.scanDelete(); wifiRest(); return; }
+
+      // 눈에 보이는 것 중에서 목록에서 가장 앞선(= 순위가 높은) 것을 고른다
+      wifiPick = -1;
+      for (int i = 0; i < WIFI_AP_COUNT && wifiPick < 0; i++)
+        for (int16_t j = 0; j < n; j++)
+          if (!strcmp(WiFi.SSID(j).c_str(), WIFI_APS[i].ssid)) { wifiPick = i; break; }
+
+      if (wifiPick < 0) {
+        Serial.printf("[와이파이] %d곳이 보이는데 아는 곳은 없다 — %lu초 뒤에 다시 둘러본다\n",
+                      (int)n, (unsigned long)(wifiRestMs / 1000));
+        WiFi.scanDelete();
+        wifiRest();
+        return;
+      }
+      Serial.printf("[와이파이] %d순위 '%s' 이 보인다 — 붙어 본다\n",
+                    wifiPick + 1, WIFI_APS[wifiPick].ssid);
+      WiFi.scanDelete();
+      WiFi.disconnect();                          // connecting 을 비우고 틈을 둔다
+      wifiPhase   = WP_SETTLE;
+      wifiPhaseAt = millis();
+      return;
+    }
+
+    case WP_SETTLE:
+      if (millis() - wifiPhaseAt < WIFI_SETTLE_MS) return;
+      if (WiFi.begin(WIFI_APS[wifiPick].ssid, WIFI_APS[wifiPick].pass) == WL_CONNECT_FAILED) {
+        // 아직 connecting 에서 안 빠졌다 — 틈을 더 두고 다시. 거부가 거듭되면 라디오를 껐다 켠다.
+        if (++wifiRejects >= WIFI_REJECT_MAX) { wifiRadioReset(); return; }
+        WiFi.disconnect();
+        wifiPhaseAt = millis();
+        return;
+      }
+      wifiRejects = 0;
+      wifiStaBusy = true;
+      wifiPhase   = WP_CONNECT;
+      wifiPhaseAt = millis();
+      return;
+
+    case WP_CONNECT:
+      // 결판이 났거나(붙지 못함) 오래 걸리면 접는다. 붙었으면 맨 위에서 걸러진다.
+      if (wifiStaBusy && millis() - wifiPhaseAt < WIFI_TRY_MS) return;
+      Serial.printf("[와이파이] %d순위 '%s' 에 못 붙었다\n",
+                    wifiPick + 1, WIFI_APS[wifiPick].ssid);
+      WiFi.disconnect();
+      wifiRest();
+      return;
+  }
 }
-
 // 와이파이가 붙으면 mDNS 와 WebSocket 서버를 켠다(한 번만).
 static void startServers() {
   if (serversUp) return;
@@ -2258,6 +2388,9 @@ void setup() {
   // 공유기를 못 찾아 네 곳을 번갈아 걸 때마다 쓰기가 나므로 그때 자주 밀린다.
   // 설정은 어차피 config.h 에 있어 저장할 이유가 없다.
   WiFi.persistent(false);
+  // 붙어 보기의 결판(CONNECTED/DISCONNECTED)을 여기서 받는다 — wifiService 는
+  // 그 신호가 온 뒤에만 다음 begin() 을 건다(까닭은 wifiService 머리말에).
+  WiFi.onEvent(onWifiEvent);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);          // 서버라 잠들지 않게 — 명령을 놓치지 않는다
   espnowBegin();                 // 라디오가 올라온 뒤에. 공유기에 붙기 전에도 리더와는 말이 된다
