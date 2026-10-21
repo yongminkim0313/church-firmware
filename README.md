@@ -14,7 +14,7 @@
 | `nfcProject/master` | LILYGO T-RGB 2.1" 원형 (ESP32-S3 · ST7701S 480×480 · CST820 터치) | **화면만** 맡는다. 카드는 건너편 리더(`slave`)가 읽어 선(I2C)이나 라디오(ESP-NOW)로 UID 를 넘긴다 |
 | `nfcProject/slave` | ESP32-C3 SuperMini + PN532(SPI) + 부저 | **리더만** 맡는다. 화면이 없고, 읽은 UID 를 넘기고 소리로 결과를 알린다 |
 | `nfcProject/single` | LILYGO T-RGB 2.1" 원형 + PN532(I2C) + 스피커 | **master + slave 를 한 보드로 합친 것.** 읽고·묻고·그리고·소리까지 혼자 한다 |
-| `funfunFirmware` | ESP32-S3-N16R8 + GC9A01 240×240 원형(SPI) + PN532(SPI) | `master` 를 **사진 없이 글자만**으로 옮긴 판. microSD 도 터치도 없다(BOOT 버튼으로 대신) |
+| `funfunFirmware` | ESP32-S3-N16R8 + GC9A01 240×240 원형(SPI) + PN532(SPI) + DFPlayer Mini(UART) | `master` 를 **사진 없이 글자만**으로 옮긴 판. microSD 도 터치도 없다(BOOT 버튼으로 대신) |
 
 세 판(`master`·`single`·`funfunFirmware`)이 서버와 직접 말한다 — 조회·지급, 설정 받기,
 그리고 `/ws/device` 로 붙어 변화를 받는다. `slave` 는 서버를 모른다.
@@ -51,6 +51,31 @@ pio device monitor      # 115200
 포트는 번호가 아니라 **보드의 시리얼**로 찾는다(`find_port.py` · `monitor_port = hwgrep://…`) —
 화면 보드와 리더 보드의 USB ID 가 같아서, 둘을 같이 꽂으면 자동 고르기가 엉뚱한 쪽을 잡는다.
 보드를 바꾸면 그 두 자리의 MAC 을 함께 고칠 것.
+
+## 소리 — funfunFirmware 만
+
+안내문을 읽는다. 합성이 아니라 **미리 구워 둔 토막**을 이어 붙이는 것이다 — DFPlayer Mini
+(YX5200)가 제 microSD 에 든 mp3 를 번호로 틀어 주는 것뿐이라, 읽을 수 있는 말은 카드에
+들어 있는 것뿐이다. 어떤 토막이 있어야 하는지는 `funfunFirmware/src/sound.h` 의 표가 정한다.
+
+```bash
+cd funfunFirmware
+./tools/make_voices.sh                 # 맥의 say(Yuna) + ffmpeg → voices/
+cp -R voices/01 voices/02 /Volumes/<SD>/   # FAT32 microSD 뿌리에
+```
+
+폴더 이름은 꼭 두 자리(`01`·`02`)로 두고, 파일은 `001.mp3` 꼴로 둔다 — 모듈이 폴더·파일
+**번호**로 찾는다. 번호를 옮기려면 `src/sound.h`(SndClip)·`src/sound.cpp`(SNDN_\*)·
+`tools/make_voices.sh` 셋을 함께 고칠 것. 어긋나면 엉뚱한 말이 나온다.
+
+구운 파일도 저장소에 함께 둔다(27개 · 268KB) — 맥이 없는 자리에서도 SD 를 다시 채울 수 있게.
+
+못 읽는 말이 셋 있다: **아이 이름**·**'지금 기분'**·**서버가 보낸 거절 안내**
+('화요일은 출석을 안 받아요'). 교회 설정과 아이가 쓴 글에 딸려 바뀌어 미리 구울 수 없다 —
+화면에는 그대로 뜨고 소리만 빈다. 서버가 합성해 보내 주는 길 셋은 `sound.h` 의 '다음 걸음' 에.
+
+배선은 `src/config.h` 의 `DF_TX_PIN`·`DF_RX_PIN`(17·18)이다. **`DF_TX` 가 모듈의 RX** 로
+가고(이름이 엇갈린다), 그 선에 1kΩ 을 끼운다. 모듈을 안 달고 구울 때는 `SOUND_ENABLE 0`.
 
 ## 서버와 맞물린 자리
 

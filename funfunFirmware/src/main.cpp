@@ -6,6 +6,8 @@
 //   · 리더가 이 보드에 직접 붙어 있다 — 참고 기기는 리더가 딴 보드라 선(I2C)·ESP-NOW 로
 //     받아 왔지만, 여기서는 PN532 를 직접 읽는다. 그 두 길은 넣지 않았다.
 //   · 터치가 없다 — 보드의 BOOT 버튼으로 대신한다(짧게: 대기 화면 · 길게: 설정 받기).
+//   · 소리가 난다 — DFPlayer Mini(YX5200)가 미리 구워 둔 토막을 이어 읽는다.
+//     읽을 수 있는 말과 못 읽는 말, SD 짜임새는 sound.h 머리말에 있다.
 //
 // ── 화면 네 가지 ──────────────────────────────────────────────────
 //   대기   : 금색 고리가 돌며 "카드를 올려 주세요". 아래에 연결 상태를 한 줄로.
@@ -41,7 +43,7 @@
 //
 // ── 시리얼 명령 (115200) ──────────────────────────────────────────
 //   h 대기 화면 · c 설정 받기 · i 상태 · t 시험 화면 · g 고리 3초 · w 와이파이 다시
-//   s 최근 출석 목록 · r 재부팅 · ? 도움말
+//   s 최근 출석 목록 · v 소리 토막 하나씩 · r 재부팅 · ? 도움말
 // ─────────────────────────────────────────────────────────────────
 
 #include <Adafruit_PN532.h>
@@ -58,6 +60,7 @@
 #include <WiFiClientSecure.h>
 
 #include "config.h"
+#include "sound.h"
 
 // https 왕복·JSON·WebSocket 이 모두 loop 에서 돈다 — 기본 8KB 로는 빠듯하다.
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
@@ -914,6 +917,10 @@ static void sendState(int8_t only = -1) {
 }
 
 static void goIdle(bool announce = true) {
+#if SOUND_SAY_IDLE
+  // 들어올 때만 부른다 — drawIdle() 은 1.5초마다 다시 그리므로 거기 두면 쉬지 않고 떠든다.
+  if (mode != MODE_IDLE) soundSay(SND_IDLE_PROMPT);
+#endif
   mode = MODE_IDLE;
   drawIdle();
   if (announce) sendState();
@@ -936,6 +943,10 @@ static void showNfc(const char *uid, const char *name, long points, bool known,
 
   mode = MODE_NFC;
   nfcUntil = millis() + NFC_SHOW_MS;
+  // 그리기보다 **먼저** 읽힌다 — drawNfc() 는 사진을 받느라 1초쯤 loop 를 붙잡는데,
+  // 모듈은 한 번 틀어 주면 혼자 읽으므로 그동안 첫 토막이 흐른다.
+  // 세 갈래(리더·ws·허브)가 모두 이 함수를 지나므로 소리를 거는 자리도 여기 하나다.
+  soundSayNote(nfcNote, nfcPoints);
   drawNfc();
   sendState();
 }
@@ -1909,6 +1920,7 @@ static void buttonService() {
     longFired = true;  // 누르는 동안 한 번만
     Serial.println("[버튼] 길게 누름 — 설정 다시 받기");
     drawStatus("설정 다시 받는 중");
+    soundSay(SND_CONFIG);
     fetchConfig();
     goIdle();
   }
@@ -1931,6 +1943,9 @@ void setup() {
   // 0 으로 두면 기다리지 않고 그 줄을 버린다 — 모니터를 띄워 두면 호스트가 계속
   // 비워 주므로 버려지는 줄은 없다. 벽돌 충전기만 꽂은 경우는 원래 영향이 없다.
   Serial.setTxTimeoutMs(0);
+  // 소리 모듈을 **여기서** 깨운다 — 전원이 들어온 뒤 스스로 서는 데 1.5초쯤 걸리는데,
+  // 바로 아래 USB CDC 를 기다리는 2초 동안 그것이 지나간다(따로 기다리지 않는다).
+  soundBegin();
   delay(2000);  // USB CDC 가 올라올 때까지 대기
 
   Serial.println();
@@ -1940,6 +1955,12 @@ void setup() {
   Serial.printf("PN532  : HSPI  SCK=%d MISO=%d MOSI=%d CS=%d\n", PN532_SCK, PN532_MISO, PN532_MOSI,
                 PN532_CS);
   Serial.printf("Server : %s · device %s\n", TALENT_SERVER, TALENT_DEVICE_ID);
+#if SOUND_ENABLE
+  Serial.printf("Sound  : DFPlayer UART1 TX=%d(모듈 RX) RX=%d(모듈 TX) · 음량 %d/30\n", DF_TX_PIN,
+                DF_RX_PIN, SOUND_VOLUME);
+#else
+  Serial.println("Sound  : 꺼 둠 (SOUND_ENABLE 0)");
+#endif
 
   gfxLock = xSemaphoreCreateMutex();
   uidLock = xSemaphoreCreateMutex();
@@ -1979,6 +2000,9 @@ void setup() {
   xTaskCreate(spinnerTask, "spinner", 4096, nullptr, 1, nullptr);
 
   drawStatus("PN532 준비 중");
+#if SOUND_SAY_BOOT
+  soundSay(SND_READER_INIT);
+#endif
 
   Serial.println("PN532 pin probe:");
   probePin(PN532_SCK, "SCK");
@@ -1993,8 +2017,10 @@ void setup() {
   if (!nfc.begin()) {
     Serial.println("ERROR: PN532 SPI 버스를 열 수 없습니다");
     drawFatal("PN532", "SPI 초기화 실패");
+    soundSay(SND_READER_FAIL);
+    // 여기서 기기가 선다 — loop 가 안 도니 소리는 이쪽에서 돌려 줘야 읽힌다.
     while (true) {
-      delay(1000);
+      soundPump(1000);
     }
   }
 
@@ -2011,8 +2037,9 @@ void setup() {
     Serial.println("  - 모듈 모드 스위치가 SPI 인지 확인 (SEL0=OFF, SEL1=ON)");
     Serial.println("  - MISO/MOSI 가 서로 바뀌지 않았는지 확인");
     drawFatal("PN532", "찾을 수 없음");
+    soundSay(SND_READER_FAIL);
     while (true) {
-      delay(1000);
+      soundPump(1000);
     }
   }
   Serial.printf("PN532 found: chip PN5%02X, firmware %d.%d\n", (ver >> 24) & 0xFF,
@@ -2057,12 +2084,16 @@ void setup() {
   // 건이라 hub 로 밀려 들어오는 길에는 영향이 없다. 2초 간격으로 재다가 헷갈리지 말 것.
   WiFi.setSleep(false);
   drawStatus("WiFi 붙는 중");
+#if SOUND_SAY_BOOT
+  soundSay(SND_WIFI);
+#endif
 
   Serial.printf("Ready. free heap %lu\n", (unsigned long)ESP.getFreeHeap());
 }
 
 void loop() {
   // 카드 스캔은 여기 없다 — 전용 일꾼(nfcTask)이 돈다. 읽은 UID 는 pendingUid 로 넘어온다.
+  soundLoop();    // 다 읽은 토막 다음 것을 밀어 넣는다(기다리지 않는다)
   wifiService();  // 와이파이 — 붙어 있으면 아무 일도 하지 않는다
 
   // 붙거나 끊기는 순간에만 다시 그린다(매번 그리면 화면이 깜빡인다)
@@ -2142,6 +2173,7 @@ void loop() {
                       serversUp ? webSocket.connectedClients() : 0,
                       online ? WiFi.localIP().toString().c_str() : "끊김",
                       (unsigned long)readCount, (unsigned long)ESP.getFreeHeap());
+        soundReport();
         // 일꾼 스택에서 **한 번도 안 쓰고 남은** 바이트. 0 에 가까우면 넓혀야 한다.
         Serial.printf("[상태] nfc 일꾼 스택 여유 %u bytes (잡은 것 4096)\n",
                       nfcTaskHandle ? (unsigned)(uxTaskGetStackHighWaterMark(nfcTaskHandle) *
@@ -2196,6 +2228,11 @@ void loop() {
         spinStop();
         goIdle();
         break;
+      // 스피커·SD·번호를 눈이 아니라 귀로 확인한다. 한 번 누를 때마다 다음 토막.
+      case 'v':
+      case 'V':
+        soundTestNext();
+        break;
       case 'w':
       case 'W':
         Serial.println("[명령] 와이파이 다시 붙기");
@@ -2211,7 +2248,7 @@ void loop() {
       case '?':
         Serial.println("[명령] h 대기 · c 설정 받기 · f 이름표 받기+목록 · d 실제 조회 시연 · "
                        "i 상태 · s 출석 목록 · x 사진 캐시 비우기 · t 시험 화면 · g 고리 · "
-                       "w 와이파이 다시 · r 재부팅");
+                       "v 소리 토막 · w 와이파이 다시 · r 재부팅");
         break;
       default:
         break;
