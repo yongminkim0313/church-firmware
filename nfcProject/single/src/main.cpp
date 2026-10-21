@@ -1,6 +1,9 @@
-// nfcSingle — PN532 를 직접 읽는 한 보드짜리 NFC 디스플레이 (CST820 원형)
+// nfcSingle — PN532 를 직접 읽는 한 보드짜리 NFC 디스플레이 (480 원형)
 //
-// 보드: LILYGO T-RGB 2.1" 원형 (ESP32-S3 · ST7701S RGB 480×480 · CST820 터치)
+// 보드: LILYGO T-RGB 2.1" 원형 (ESP32-S3 · ST7701S RGB 480×480)
+//       화면은 **HL021TWV9009ANT** 로 갈았다 — 기존 LCD FPC 커넥터에 그대로 꽂힌다.
+//       **이 화면에는 터치가 없다**(데이터시트 4쪽 Touch IC '-'). 손가락이 하던 두 가지는
+//       시리얼·WebSocket 으로 옮겼다 — config.h 의 HAVE_TOUCH 머리말을 보라.
 //       + PN532 모듈 하나 (Grove 4핀 I2C) + 패시브 스피커 하나 (GPIO0)
 //
 // **master(화면) + slave(리더) 를 한 보드로 합친 것이다.** 예전에는 ESP32-C3 리더가
@@ -57,8 +60,8 @@
 //   서버에 무엇을 물을 때(조회·출석·설정·사진) 화면 테두리를 금색 고리가 돈다.
 //   따로 띄운 일꾼이 그린다 — 서버 왕복이 loop 를 붙잡고 있는 동안에도 돌아간다.
 //
-// ── 사진 동기화 (화면 길게 누르기) ──────────────────────────────────
-//   화면을 LONG_PRESS_MS 이상 누르면 펀펀포인트 서버(config.h 의 TALENT_SERVER)에서
+// ── 사진 동기화 (시리얼 'y' · ws "sync" — 예전의 '화면 길게 누르기') ──
+//   시키면 펀펀포인트 서버(config.h 의 TALENT_SERVER)에서
 //   이름표(GET /api/talent/roster?px=480)를 받아, 사진이 있는 UID 마다 480 원형 사진
 //   (GET /api/talent/photo/device/<img>)을 내려받아 microSD 에 /talent/<UID>.565 로 저장한다.
 //   요청에는 x-talent-key 헤더(TALENT_DEVICE_KEY)를 실어 서버가 기기를 확인한다.
@@ -95,6 +98,13 @@
 //         JSON  {"state":"enable"} / {"state":"toggle"} / {"state":"next"} / {"state":"prev"}
 //         글자  "enable" / "toggle" / "next" / "prev"   (enable = 활성 화면으로, toggle·next = 다음 사진)
 //         ※ "disable"·{"enabled":false} 는 예전 규약이다 — 비활성 그림을 걷어내 활성 화면으로 간다.
+//     · 손가락이 하던 두 가지 (2026-10-21, 터치 없는 화면으로 갈면서)
+//         JSON  {"state":"tap"}  / 글자 "tap"   짧게 누르기
+//               **"next" 와 다르다** — NFC 화면이 떠 있으면 다음 사진이 아니라 대기 화면으로
+//               돌아간다. 손가락이 하던 그대로다.
+//         JSON  {"state":"sync"} / 글자 "sync"  길게 누르기 = 사진 동기화(서버→SD)
+//               받자마자 하지 않고 깃발만 세운다 — 수십 초짜리 https 라 콜백 위에서 돌면
+//               그동안 받는 쪽이 통째로 멎는다. 푸는 것은 loop 한 곳이다.
 //     · NFC 태그 알림 — **UID 하나면 된다**. 이름·잔액은 이 기기가 서버에 물어 채운다.
 //         JSON  {"uid":"04A1B2C3"}
 //         (옛 규약 {"uid":…,"name":…,"points":…} 도 받는다 — 그때는 묻지 않고 그대로 띄운다)
@@ -119,11 +129,13 @@
 //     버전 충돌로 빌드가 깨진다. 이 스케치는 Arduino_GFX 로 직접 그린다(v1.0 과 같은 이유).
 //
 // ── 시리얼 명령 (115200) ────────────────────────────────────────────
-//   n 다음 사진 · p 이전 사진 · h 활성 화면으로 · s 사진 목록 · l SD 파일 목록 · r 재부팅 · ? 도움말
+//   n 다음 사진(예전의 '짧게 누르기') · p 이전 사진 · h 활성 화면으로 · s 사진 목록
+//   l SD 파일 목록 · r 재부팅 · ? 도움말
 //   t 시험 NFC 화면(카드·서버 없이 이름·포인트·기분을 띄워 글자를 본다 — 누를 때마다 다음 보기)
 //   g 불러오는 중 고리를 3초 돌려 본다(서버 없이 확인용)
 //   b 소리 시험(삑 · 삐-삐 · 삐리) · f PN532 로 8초 동안 직접 카드를 훑어 본다
 //   v 화면 색 시험(민무늬 여섯 색을 차례로 띄운다 — 색차례와 자글거림을 가른다)
+//   y 사진 동기화 — 서버에서 사진을 받아 SD 에 저장한다(예전의 '화면 길게 누르기')
 //
 // ── 그림 바꾸기 ─────────────────────────────────────────────────────
 // 그림 헤더는 tools/img2rgb565_dither.py 로 만든다(v1.0 머리말 참고). 자기 그림으로 바꾸려면
@@ -401,6 +413,14 @@ static bool     cfgGotOnce     = false;  // 한 번이라도 받아 봤나(시�
 //   두는 것과 같은 규율이다. 깃발만 세우고 푸는 것은 loop 가 한다.
 static volatile bool cfgWanted = false;
 
+// '사진 동기화' 도 같은 깃발로 간다 — 예전에는 **화면을 길게 누르면** 그 자리에서
+// syncPhotos() 를 불렀지만, 이 화면에는 터치가 없어 시리얼 'y' 와 ws "sync" 로 들어온다
+// (config.h 의 HAVE_TOUCH). 둘 다 깃발만 세우고 푸는 것은 loop 다:
+// syncPhotos 는 이름표를 받고 사진을 한 장씩 내려받는 **수십 초짜리 https 일**이라,
+// WebSocket 콜백 위에서 돌면 그동안 받는 쪽이 통째로 멎는다. 미뤄 두는 까닭은
+// 태그를 pendingUid 로, 설정을 cfgWanted 로 미루는 것과 똑같다.
+static volatile bool syncWanted = false;
+
 // 최근 출석한 키링 — 같은 아이가 잇달아 대도 한 번만 센다(ATTEND_COOLDOWN_MS).
 struct AttendSeen { char uid[24]; uint32_t at; };
 static AttendSeen attendSeen[ATTEND_RECENT_MAX];
@@ -464,11 +484,13 @@ static void nfcBegin() {
 
 
 static bool online    = false;   // 화면에 그려 둔 연결 상태(아이콘이 떠 있나)
-static bool wasDown   = false;   // 직전에 손가락이 닿아 있었나(누르는 순간을 가려내려고)
 static bool serversUp = false;   // mDNS·WebSocket 을 켰나(와이파이가 붙은 뒤 한 번만)
+static bool     bootSyncDone = false; // 부팅 후 와이파이가 처음 붙었을 때 사진을 한 번 받아 왔나
+#if HAVE_TOUCH
+static bool wasDown   = false;   // 직전에 손가락이 닿아 있었나(누르는 순간을 가려내려고)
 static uint32_t downAt   = 0;    // 손가락이 닿기 시작한 시각(길게/짧게 가려내려고)
 static bool     longFired = false; // 이번 누름에서 '길게' 동작을 이미 한 번 했나
-static bool     bootSyncDone = false; // 부팅 후 와이파이가 처음 붙었을 때 사진을 한 번 받아 왔나
+#endif
 
 // ── 합쳐 그리기용 버퍼 ──────────────────────────────────────────────
 // 배경을 먼저 그리고 아이콘/띠를 나중에 얹으면 그 틈에 깜빡인다(RGB 화면은 프레임버퍼를
@@ -1769,6 +1791,12 @@ static void handleWord(const char *s) {
   else if (!strcmp(s, "enable") || !strcmp(s, "disable")) homePhoto();
   else if (!strcmp(s, "toggle") || !strcmp(s, "next"))    nextPhoto();
   else if (!strcmp(s, "prev"))                            prevPhoto();
+  // 터치가 없는 화면을 달면서 생긴 두 말이다(2026-10-21).
+  // "tap"  = 짧게 누르기. **"next" 와 다르다** — NFC 화면이 떠 있으면 다음 사진으로
+  //          넘어가는 것이 아니라 대기 화면으로 돌아간다. 손가락이 하던 그대로다.
+  // "sync" = 길게 누르기(서버에서 사진을 받아 SD 에 저장). 깃발만 세운다 — 위를 보라.
+  else if (!strcmp(s, "tap"))   { if (mode == MODE_NFC) goIdle(); else nextPhoto(); }
+  else if (!strcmp(s, "sync"))  syncWanted = true;
 }
 
 // JSON 에 "uid" 가 있으면 NFC 알림, 아니면 대기 화면 전환 명령으로 본다.
@@ -2025,7 +2053,12 @@ static void startServers() {
   serversUp = true;
 }
 
-// ── 터치 (v1.0 과 동일) ─────────────────────────────────────────────
+// ── 터치 ────────────────────────────────────────────────────────────
+// **지금 달린 화면(HL021TWV9009ANT)에는 터치가 없다.** 그래서 config.h 의 HAVE_TOUCH 가
+// 0 이고, 아래 둘은 통째로 빠진다 — 없는 칩을 매 loop 마다 두드리면 아두이노 코어가
+// i2cWrite(): ESP_ERR_INVALID_STATE 를 찍어 시리얼이 도배되고, 같은 버스를 쓰는
+// PN532·화면 확장칩의 차례도 밀린다. 터치 있는 화면을 다시 달면 1 로 되돌리면 된다.
+#if HAVE_TOUCH
 static void touchBegin() {
   bus->pinMode(1, OUTPUT);       // 확장칩 1번 = 터치 리셋(TP_RES)
   bus->digitalWrite(1, 0);
@@ -2059,6 +2092,7 @@ static bool touching() {
   for (int i = 0; i < 4; i++) Wire.read();   // X·Y 네 바이트는 버린다
   return fingers == 1;
 }
+#endif  // HAVE_TOUCH
 
 void setup() {
   Serial.begin(115200);
@@ -2108,7 +2142,12 @@ void setup() {
   backlightOn(cfgBacklight);     // 서버에 붙기 전까지는 펌웨어 기본값(BL_LEVEL)
   Serial.printf("밝기 %d/16 단계 (서버 설정을 받으면 바뀐다)\n", cfgBacklight);
 
+#if HAVE_TOUCH
   touchBegin();                  // 화면을 켠 뒤에 — 확장칩(bus)이 begin() 에서 준비된다
+#else
+  Serial.println("터치 없음 — 이 화면(HL021TWV9009ANT)에는 터치칩이 없다."
+                 " 짧게 누르기는 시리얼 'n'·ws \"tap\", 길게 누르기는 시리얼 'y'·ws \"sync\" 다");
+#endif
 
   // 소리와 카드 리더 — 예전에 리더(C3)가 하던 일이다.
   // 스피커를 먼저 켜 둔다: PN532 가 준비되면 nfcBegin 이 '삐리' 로 알려 준다.
@@ -2172,6 +2211,15 @@ void loop() {
     fetchConfig();
   }
 
+  // 사진 동기화 — 예전에 **화면을 길게 누르던** 자리다. 시리얼 'y' 든 ws "sync" 든
+  // 깃발만 세워 두고, 푸는 것은 여기 한 곳이다(수십 초짜리 https 라 콜백 위에서 돌면
+  // 받는 쪽이 멎는다). 와이파이가 없으면 받을 데가 없으니 그 말만 하고 깃발을 내린다.
+  if (syncWanted) {
+    syncWanted = false;
+    if (online) syncPhotos();
+    else        Serial.println("[사진] 와이파이가 없어 못 받는다 — 붙은 뒤에 다시");
+  }
+
   // client 연결 상태 점 — client 가 붙거나 떨어져 색이 바뀔 때만 다시 그린다(화면 갱신 없이도)
   if (linkState() != shownLink) drawLinkDot();
 
@@ -2208,9 +2256,13 @@ void loop() {
         sndOk(); delay(400); sndFail(); delay(400); sndReady();
         break;
       case 'f': case 'F': nfcProbe(); break;       // PN532 로 8초 동안 직접 카드를 훑어 본다
+      case 'y': case 'Y':                          // 예전의 '화면 길게 누르기'
+        Serial.println("[명령] 사진 동기화 — 서버에서 받아 SD 에 저장합니다");
+        syncWanted = true;                         // 푸는 것은 loop 한 곳이다(위)
+        break;
       case 'v': case 'V': colorBarTest(); break;  // 민무늬 색으로 화면 탈(색차례·자글거림)을 가른다
       case 'r': case 'R': Serial.println("[명령] 재부팅합니다..."); Serial.flush(); ESP.restart(); break;
-      case '?':           Serial.println("[명령] n 다음 · p 이전 · h 활성 · s 사진 목록 · l SD 목록 · c 설정 받기 · i 상태 · t 시험 화면 · g 고리 · b 소리 · f 카드 훑기 · v 화면 색 · r 재부팅"); break;
+      case '?':           Serial.println("[명령] n 다음 · p 이전 · h 활성 · s 사진 목록 · l SD 목록 · c 설정 받기 · i 상태 · t 시험 화면 · g 고리 · b 소리 · f 카드 훑기 · v 화면 색 · y 사진 동기화 · r 재부팅"); break;
       default: break;
     }
   }
@@ -2218,6 +2270,7 @@ void loop() {
   // NFC 화면은 몇 초 뒤 자동으로 대기 화면으로 돌아간다
   if (mode == MODE_NFC && (int32_t)(millis() - nfcUntil) >= 0) goIdle();
 
+#if HAVE_TOUCH
   // 터치 — 짧게: (NFC 화면이면 대기로 / 대기 화면이면 다음 사진),  길게: 서버에서 사진 동기화
   const bool down = touching();
   if (down && !wasDown) { downAt = millis(); longFired = false; }     // 누르기 시작
@@ -2231,6 +2284,7 @@ void loop() {
     else                  nextPhoto();
   }
   wasDown = down;
+#endif
 
   delay(5);                      // WebSocket 반응을 위해 v1.0(20ms)보다 촘촘히 돈다
 }
