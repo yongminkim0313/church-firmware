@@ -37,11 +37,21 @@
 // 파일이 없는 경우에 줄이 영영 멈춰 서지 않게 하는 빗장이다. 가장 긴 토막이 1.5초쯤이다.
 #define DF_CLIP_MAX_MS 5000
 
-// ── 폴더 02 — 숫자 토막 ─────────────────────────────────────────
-// 한자말 수 읽기(일·이·삼…)로 이어 붙인다. 번호는 tools/make_voices.sh 와 같다.
+// ── 숫자 — 두 갈래 ───────────────────────────────────────────────
+// 폴더 03 : 0~100 을 **한 토막씩** 통째로. 번호가 '수 + 1' 이다(0→001 … 100→101).
+//           소리로 나가는 수는 거의 다 이 구간이다 — 출석 포인트와 웬만한 잔액.
+// 폴더 02 : 조립용 토막(일·이·삼…십·백·천·만). 100 을 넘는 잔액에만 쓴다.
+//
+// ★ 왜 둘인가 — 이어 붙이면 '오십칠' 이 '오 · 십 · 칠' 로 띄엄띄엄 들린다(토막마다
+//   앞뒤 쉼이 붙어 세 토막이면 2.3초, 통째면 1.0초다). 그래서 쓰는 구간만 통째로 굽고,
+//   100 을 넘는 수는 **되돌아갈 자리**로 조립을 남긴다 — 아이들이 모아 둔 잔액은 네
+//   자리까지 가는데(1205·12345), 그때 소리가 통째로 비면 그게 더 나쁘다.
+#define SNDN_WHOLE_FOLDER 3
+#define SNDN_WHOLE_MAX 100  // 여기까지는 통째로 — 넘으면 아래 조립으로 간다
 #define SNDN_FOLDER 2
-#define SNDN_ZERO 1    // 영
-#define SNDN_TEN 11    // 십
+// 이 폴더에서 실제로 쓰는 것은 **이~구 · 백 · 천 · 만**뿐이다. 영(001)·일(002)·십(011)은
+// 폴더 03 이 통째로 맡아 쓸 일이 없지만 그 자리를 비우지 않는다 — 아래 SNDN_DIGIT 의
+// '수 + 1' 이 그 칸들을 세고 있다.
 #define SNDN_HUNDRED 12  // 백
 #define SNDN_THOUSAND 13  // 천
 #define SNDN_MAN 14    // 만
@@ -146,10 +156,23 @@ static void qClear() {
   qCount = 0;
 }
 
-// 한자말로 수를 읽는다. 1 은 자리 이름만 읽는다 — '일백' 이 아니라 '백' 이다.
-static void enqGroup(long n) {  // 1~9999
-  const int th = (int)(n / 1000), hu = (int)((n / 100) % 10), te = (int)((n / 10) % 10),
-            on = (int)(n % 10);
+// 0~100 한 토막. 번호가 '수 + 1' 이다(0→001 … 100→101).
+static void enqWhole(long v) { enq(SNDN_WHOLE_FOLDER, (uint8_t)(v + 1)); }
+
+// 1~9999 를 읽는다(100 을 넘는 수에만 온다).
+//
+// ★ **끝의 두 자리는 쪼개지 않는다** — 폴더 03 에서 통째로 가져온다.
+//     125  → [백][이십오]          ('백·이·십·오' 네 토막이 아니라 두 토막)
+//     225  → [이][백][이십오]
+//     1205 → [천][이][백][오]
+//     2026 → [이][천][이십육]
+//   앞자리(천·백)만 토막을 세우고 뒤는 한 입에 읽는 것이, 사람이 읽는 꼴에도 가깝다.
+//   십 자리를 따로 세우지 않으니 폴더 02 의 '십' 토막은 이제 쓰이지 않는다.
+//
+// 1 은 자리 이름만 읽는다 — '일백' 이 아니라 '백' 이다.
+static void enqGroup(long n) {
+  const int th = (int)(n / 1000), hu = (int)((n / 100) % 10);
+  const int rest = (int)(n % 100);  // 끝 두 자리 — 통째로 읽는다
   if (th) {
     if (th > 1) enq(SNDN_FOLDER, SNDN_DIGIT(th));
     enq(SNDN_FOLDER, SNDN_THOUSAND);
@@ -158,19 +181,15 @@ static void enqGroup(long n) {  // 1~9999
     if (hu > 1) enq(SNDN_FOLDER, SNDN_DIGIT(hu));
     enq(SNDN_FOLDER, SNDN_HUNDRED);
   }
-  if (te) {
-    if (te > 1) enq(SNDN_FOLDER, SNDN_DIGIT(te));
-    enq(SNDN_FOLDER, SNDN_TEN);
-  }
-  if (on) enq(SNDN_FOLDER, SNDN_DIGIT(on));
+  if (rest) enqWhole(rest);
 }
 
 // 0 ~ 99,999,999. 그보다 큰 수는 읽지 않는다(토막을 더 굽지 않고 조용히 지나간다 —
 // 포인트가 억을 넘는 일은 없고, 넘었다면 읽는 쪽이 아니라 서버를 봐야 한다).
 static void enqNumber(long v) {
   if (v < 0) v = -v;  // 부호는 읽지 않는다 — 소리로 읽는 자리는 지급(+)뿐이다
-  if (v == 0) {
-    enq(SNDN_FOLDER, SNDN_ZERO);
+  if (v <= SNDN_WHOLE_MAX) {
+    enqWhole(v);  // 100 까지는 한 토막
     return;
   }
   if (v > 99999999L) return;
@@ -330,18 +349,23 @@ void soundSayNote(const char *note, long points) {
 
 // ── 시험·상태 ────────────────────────────────────────────────────
 void soundTestNext() {
-  static uint8_t clip = SND_IDLE_PROMPT;
-  // 숫자까지 한 번씩 들어 보게, 고정 문구를 다 돌면 수 하나를 읽는다.
-  if (clip > SND_PEOPLE) {
-    Serial.println("[소리] 시험 — 숫자 1234");
+  // 고정 문구 13개를 돈 뒤 수 두 개 — 통째(폴더 03)와 조립(폴더 02) 두 길을 다 들어 본다.
+  static uint8_t step = 0;
+  const uint8_t steps = SND_PEOPLE + 2;
+  if (step < SND_PEOPLE) {
+    const uint8_t clip = (uint8_t)(step + 1);
+    Serial.printf("[소리] 시험 %u/%u — /%02d/%03d\n", step + 1, steps, SND_FOLDER, clip);
+    soundSay(clip);
+  } else if (step == SND_PEOPLE) {
+    Serial.printf("[소리] 시험 %u/%u — 57 (0~100 통째)\n", step + 1, steps);
+    soundStop();
+    enqNumber(57);
+  } else {
+    Serial.printf("[소리] 시험 %u/%u — 1234 (토막 조립)\n", step + 1, steps);
     soundStop();
     enqNumber(1234);
-    clip = SND_IDLE_PROMPT;
-    return;
   }
-  Serial.printf("[소리] 시험 — /%02d/%03d\n", SND_FOLDER, clip);
-  soundSay(clip);
-  clip++;
+  step = (uint8_t)((step + 1) % steps);
 }
 
 void soundReport() {
