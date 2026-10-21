@@ -1130,8 +1130,13 @@ static void buildState(char *msg, size_t cap) {
              photoLabel(photoIdx), photoIdx, sdPhotoCount, attend, online ? "true" : "false");
 }
 
-// 선으로는 **NFC 결과만** 보낸다. 리더가 쓰는 것은 그것뿐이고(소리를 가른다), 대기 화면
-// 알림은 리더에게 아무 쓸모가 없다. 그리고 I2C 한 덩이에 들어가야 해서 mode·online 처럼
+// 선으로는 **NFC 결과만** 보낸다. 리더가 쓰는 것은 그것뿐이고(부저를 가르고 **말로 읽는다**),
+// 대기 화면 알림은 리더에게 아무 쓸모가 없다.
+//
+// ★ 2026-10-21 부터 이 덩이가 **소리의 대본**이다. 리더에 DFPlayer 가 붙었는데(이 보드는
+//   밖으로 I2C 만 내주므로 저쪽에 붙였다 — slave/src/sound.h), 그 모듈이 읽을 말을 고르는
+//   재료가 바로 여기 note·points 다. 그래서 note 의 글자를 고치면 **리더의 표(NOTE_CLIPS)도
+//   함께** 고쳐야 한다 — 어긋나면 그 문구만 조용해진다(틀리게 읽지는 않는다). 그리고 I2C 한 덩이에 들어가야 해서 mode·online 처럼
 // 안 쓰는 칸을 뺀 짧은 꼴로 만든다 — 칸마다 길이를 잘라 두어 버퍼를 넘지 않게 한다
 // (넘쳐서 잘리면 JSON 이 깨져 리더가 답을 못 알아본다).
 //
@@ -1140,15 +1145,38 @@ static void buildState(char *msg, size_t cap) {
 //   (라디오 쪽은 250바이트까지 들어가지만, 두 길이 **같은 글자**라야 리더가 한 곳에서 푼다.)
 static void linkSendResult() {
   if (mode != MODE_NFC) return;
-  char msg[192];
+  char msg[224];
+  // ★ note 를 32 → 63바이트로 넓혔다(2026-10-21, 소리를 달면서). 한글 한 자가 3바이트라
+  //   32 로는 "서버에 물어보지 못했어요"(35바이트)가 글자 중간에서 잘려, 리더가 그 문구를
+  //   표에서 찾지 못해 조용해졌다. nfcNote 가 64바이트이므로 63 이면 늘 통째로 간다.
   snprintf(msg, sizeof(msg),
-           "{\"uid\":\"%.24s\",\"name\":\"%.40s\",\"points\":%ld,\"known\":%s,\"note\":\"%.32s\"}",
+           "{\"uid\":\"%.24s\",\"name\":\"%.40s\",\"points\":%ld,\"known\":%s,\"note\":\"%.63s\"}",
            nfcUid, nfcName, nfcPoints, nfcKnown ? "true" : "false", nfcNote);
   linkSend(msg);                       // 선 — 살아 있을 때만 나간다
 #if ESPNOW_ENABLE
   // 선이 죽어 있을 때만 라디오로. 둘 다 살아 있으면 선으로만 보낸다 — 답이 겹쳐 가도
   // 리더는 먼저 온 것만 쓰지만(handleDisplayReply), 쓸데없이 라디오를 두드릴 일은 없다.
   if (!linkAlive() && readerKnown) espnowSend(readerMac, msg);
+#endif
+}
+
+// ── 리더에게 "이 말을 읽어 줘" ───────────────────────────────────────
+// 스피커는 리더에 있다(까닭은 config.h 의 '소리'). 태깅 결과는 위 linkSendResult 로 저절로
+// 건너가지만, **이 보드 제 쪽에서 일어난 일**(와이파이가 끊겼다·설정을 다시 받는다)은
+// 보낼 자리가 없었다. 그래서 칸 하나를 더 쓴다 —
+//   {"say":"설정 다시 받는 중"}
+// 번호가 아니라 **글자**를 보내는 것이 요점이다. 화면에 그리는 글자를 그대로 보내면
+// 리더가 제 표에서 토막을 찾고, 모르는 글자는 조용히 지나간다. 소리 번호를 두 저장소에
+// 나눠 들고 있지 않아도 된다(funfunFirmware 와 같은 규율 — sound.h 의 '읽는 말 = 화면 글자').
+//
+// 선이 없으면 라디오로, 둘 다 없으면 그냥 지나간다 — 말 한 마디를 위해 기다리지 않는다.
+static void readerSay(const char *note) {
+  if (!note || !note[0]) return;
+  char msg[96];
+  snprintf(msg, sizeof(msg), "{\"say\":\"%.63s\"}", note);
+  if (linkAlive()) { linkSend(msg); return; }
+#if ESPNOW_ENABLE
+  if (readerKnown) espnowSend(readerMac, msg);
 #endif
 }
 
@@ -1170,6 +1198,11 @@ static void sendState(int8_t only = -1) {
 
 // 대기 화면으로 (다시) 들어간다.
 static void goIdle(bool announce = true) {
+#if SOUND_SAY_IDLE
+  // 들어올 때만 부른다 — 대기 화면은 사진을 바꿀 때마다 다시 그려지므로, 그리는 자리에
+  // 두면 쉬지 않고 떠든다. 그래도 줄이 선 현장에서는 시끄럽다(config.h 참고).
+  if (mode != MODE_IDLE) readerSay("카드를 올려 주세요");
+#endif
   mode = MODE_IDLE;
   drawIdle();
   if (announce) sendState();
@@ -2435,6 +2468,13 @@ void loop() {
       }
     } else {
       Serial.println("[와이파이] 끊김");
+#if SOUND_SAY_WIFI
+      // 한 번만 — 다시 붙기는 혼자 되풀이하지만(wifiService) 말은 끊긴 그 순간에 한 마디다.
+      // 이 자리에 둔 까닭: 와이파이가 없으면 조회가 안 되는데, 그걸 모르는 자원봉사자는
+      // 카드를 계속 대 본다. 부팅할 때는 말하지 않는다 — 그때는 리더가 아직 선 너머에
+      // 살아 있지 않아 어차피 못 가고, 리더가 제 '리더 준비 중' 을 이미 읽는다.
+      readerSay("와이파이 붙는 중");
+#endif
     }
     if (mode == MODE_IDLE) drawIdle();   // 대기 화면일 때만 아이콘을 갱신(NFC 화면은 건드리지 않는다)
     sendState();
@@ -2469,7 +2509,18 @@ void loop() {
       case 'h': case 'H': Serial.println("[명령] 활성 화면"); homePhoto(); break;
       case 's': case 'S': listPhotos(); break;
       case 'l': case 'L': listSD(); break;
-      case 'c': case 'C': Serial.println("[명령] 설정 다시 받기"); fetchConfig(); break;
+      case 'c': case 'C':
+        Serial.println("[명령] 설정 다시 받기");
+        // 손으로 부른 것만 읽어 준다 — 주기(CONFIG_TTL_MS)마다 읽으면 5분에 한 번씩
+        // 혼잣말하는 상자가 된다. 화면을 길게 누르는 쪽(사진 동기화)은 조용하다:
+        // 그 일에 맞는 토막이 없다(필요해지면 /01/014 에 얹고 여기처럼 한 줄 부르면 된다).
+        readerSay("설정 다시 받는 중");
+        fetchConfig();
+        break;
+      case 'v': case 'V':                          // 스피커·SD 가 살아 있나(리더에서 소리가 난다)
+        Serial.println("[명령] 리더에게 한 마디 — '카드를 올려 주세요'");
+        readerSay("카드를 올려 주세요");
+        break;
       case 'i': case 'I':
         Serial.printf("[상태] 기기 %s · 밝기 %d/16 · 출석모드 %s · 출석 카드 %s · 설정 %s\n",
                       TALENT_DEVICE_ID, cfgBacklight, cfgAttendMode ? "켜짐" : "꺼짐",
@@ -2489,7 +2540,7 @@ void loop() {
         spinStart(); delay(3000); spinStop();      // delay 는 쉬는 것이라 그동안 일꾼이 돈다
         break;
       case 'r': case 'R': Serial.println("[명령] 재부팅합니다..."); Serial.flush(); ESP.restart(); break;
-      case '?':           Serial.println("[명령] n 다음 · p 이전 · h 활성 · s 사진 목록 · l SD 목록 · c 설정 받기 · i 상태 · t 시험 화면 · g 고리 · r 재부팅"); break;
+      case '?':           Serial.println("[명령] n 다음 · p 이전 · h 활성 · s 사진 목록 · l SD 목록 · c 설정 받기 · i 상태 · t 시험 화면 · v 리더 소리 · g 고리 · r 재부팅"); break;
       default: break;
     }
   }

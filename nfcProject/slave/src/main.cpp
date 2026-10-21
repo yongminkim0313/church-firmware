@@ -6,6 +6,10 @@
 //        모듈 딥스위치를 SPI 로 놓아야 한다. I2C 는 이 모듈에서 고장 나 못 쓴다(2026-09-24 확인).
 // 부저: GPIO10 → (+), GND → (−)  — 수동/능동은 config.h 의 BUZZER_ACTIVE
 //        (SPI 의 SS 가 GPIO7 을 쓰게 되어 부저를 GPIO10 으로 옮겼다)
+// 소리: DFPlayer Mini(YX5200) — GPIO0→모듈 RX(1kΩ) · GPIO1←모듈 TX · 5V · GND (config.h)
+//        **디스플레이가 아니라 이 보드에 붙는다** — 저쪽이 밖으로 내주는 선은 I2C 뿐인데
+//        DFPlayer 는 UART 로만 말을 듣는다. 읽을 말은 디스플레이가 글자로 보내 준다.
+//        무엇을 읽고 무엇을 못 읽는지는 src/sound.h 머리말에.
 //   삑(높게 한 번)      디스플레이가 아는 키링으로 처리했다
 //   삐-삐(낮게 두 번)   서버에 없는 카드 · 디스플레이에 못 보냄 · 답이 없음
 //   삐리(올라가는 두 음) 켜져서 PN532 가 준비됨
@@ -15,7 +19,8 @@
 //   1) 디스플레이로 가는 길을 연다 (아래 '두 갈래 길')
 //   2) 카드를 대면 UID(대문자 hex, 예: 04CE1B53D12A81)를 읽어
 //   3) 디스플레이에 {"uid":"…"} 를 보낸다
-//   4) 디스플레이가 돌려주는 {"mode":"nfc","name":…,"points":…,"known":…,"note":…} 로 소리를 고른다
+//   4) 디스플레이가 돌려주는 {"uid":…,"name":…,"points":…,"known":…,"note":…} 로
+//      부저 소리를 가르고, 그 note·points 를 그대로 읽어 준다(sound.h)
 //
 // ── 디스플레이로 가는 두 갈래 길 ────────────────────────────────────
 //   1순위 **선(I2C)**    디스플레이 옆면 4핀 커넥터에 SDA·SCL·GND 세 가닥으로 문다(config.h 배선).
@@ -43,6 +48,8 @@
 //   raw                CS 를 내리고 바이트를 그대로 주고받아 MISO 에 뭐가 오나 본다
 //   lines              SCK/MISO/MOSI/SS 선 상태
 //   beep               부저 소리 세 가지를 차례로 낸다
+//   voice              소리 토막을 하나씩 차례로 읽는다(스피커·SD·번호 확인)
+//   say <문구>         그 문구를 읽어 본다(예: say 출석 완료 +5P)
 //
 // ── 빌드 ────────────────────────────────────────────────────────────
 //   arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc,PartitionScheme=huge_app nfcProjectClient
@@ -57,8 +64,20 @@
 #include <ArduinoJson.h>
 #include <Adafruit_PN532.h>
 #include "config.h"
+#include "sound.h"
 
 // ── 부저 ────────────────────────────────────────────────────────────
+// 말(DFPlayer)이 붙은 뒤에도 부저를 없애지 않았다 — 말보다 **빠르다**. 모듈이 첫 소리를
+// 내기까지 100ms 가 넘는데 부저는 그 자리에서 울려, 아이는 삑 소리로 '읽혔다' 를 먼저
+// 안다. 겹치는 것이 싫으면 config.h 의 SOUND_KEEP_BEEP 를 0 으로.
+// ★ 다만 소리 쪽을 아예 꺼 둔 채로(SOUND_ENABLE 0) 부저까지 끄면 아무 알림이 없어진다 —
+//   그때는 설정을 무시하고 부저를 울린다.
+#if SOUND_ENABLE && !SOUND_KEEP_BEEP
+#define BEEP_ON_REPLY 0
+#else
+#define BEEP_ON_REPLY 1
+#endif
+
 static void beep(uint16_t hz, uint16_t ms) {
   if (PIN_BUZZER < 0) return;
 #if BUZZER_ACTIVE
@@ -97,30 +116,84 @@ static bool radioWanted = false;         // 선이 조용해지면 radioGate 가
 static bool radioWanted = true;          // 선을 안 쓰는 설정 — 처음부터 라디오
 #endif
 
-// ── 디스플레이의 답 (선·와이파이 공용) ──────────────────────────────
+// ── 디스플레이의 답 (선·라디오 공용) ────────────────────────────────
 // 보낸 태그의 답을 기다리는 중인가 — 디스플레이가 조회·출석 처리를 마치면
-// {"mode":"nfc",...} 를 돌려준다. 그 답으로 소리를 가른다(아래 ackService).
+// {"uid":…,"name":…,"points":…,"known":…,"note":…} 를 돌려준다. 그 답으로 부저를 가르고,
+// note·points 를 그대로 읽는다(sound.h). 답이 없으면 아래 ackService 가 접는다.
 static char     ackUid[24] = "";
 static uint32_t ackUntil   = 0;
 
-// 어느 길로 왔든 답을 푸는 곳은 여기 하나다. 두 길로 같은 답이 겹쳐 와도 탈이 없다 —
-// 먼저 온 것이 ackUid 를 비우므로 뒤에 온 것은 첫 줄에서 조용히 돌아간다.
-// JSON 으로 안 읽히는 것(잡음)은 그대로 버린다.
+// 같은 답을 두 번 읽지 않게 — 무엇을 마지막으로 읽었나.
+// 디스플레이는 상태가 바뀔 때마다 알림을 보내므로 한 태깅의 같은 덩이가 두 번 올 수 있고,
+// 선과 라디오가 함께 살아 있으면 두 길로 겹쳐 올 수도 있다. 부저는 ackUid 가 비워져
+// 저절로 한 번이지만, 말은 ack 를 기다리지 않는 자리(아래 ③)에도 있어 따로 막는다.
+static char     saidUid[24]  = "";
+static char     saidNote[64] = "";
+static long     saidPoints   = 0;
+static uint32_t saidAt       = 0;
+
+static bool sayOnce(const char *uid, const char *note, long points) {
+  const uint32_t now = millis();
+  if (!strcmp(uid, saidUid) && !strcmp(note, saidNote) && points == saidPoints &&
+      now - saidAt < SOUND_REPEAT_MS)
+    return false;
+  strncpy(saidUid, uid, sizeof(saidUid) - 1);    saidUid[sizeof(saidUid) - 1]   = '\0';
+  strncpy(saidNote, note, sizeof(saidNote) - 1); saidNote[sizeof(saidNote) - 1] = '\0';
+  saidPoints = points;
+  saidAt     = now;
+  return true;
+}
+
+// 어느 길로 왔든(선·라디오) 디스플레이가 보낸 것을 푸는 곳은 여기 하나다.
+// JSON 으로 안 읽히는 것(잡음)은 그대로 버린다. 세 가지가 온다 —
 //
-// 두 길 모두 같은 짧은 꼴로 온다(I2C 한 덩이에 들어가야 해서 mode 칸이 없다).
-// 그래서 mode 를 보지 않고 **uid 가 맞는지**로
-// 가른다 — 대기 화면 알림({"mode":"idle",...})에는 uid 가 없어 어차피 걸러진다.
+//   ① {"say":"설정 다시 받는 중"}   디스플레이 제 쪽 사정. 태깅과 무관하게 바로 읽는다.
+//   ② {"uid":…,"note":…,"points":…} 내가 넘긴 카드의 답. 부저를 가르고 말로 읽는다.
+//   ③ 같은 꼴인데 **묻지 않은 것**    관리 화면에서 포인트를 고치면 서버가 디스플레이에
+//      밀어 주고, 저쪽이 그 아이를 띄우며 이쪽에도 알려 준다. 아이가 카드를 댄 것이
+//      아니므로 부저는 울리지 않고 말만 한다.
+//
+// 두 길 모두 같은 짧은 꼴로 온다(I2C 한 덩이에 들어가야 해서 mode 칸이 없다). 그래서
+// mode 를 보지 않고 **uid 가 있는지·맞는지**로 가른다 — 대기 화면 알림에는 uid 가 없다.
 static void handleDisplayReply(const char *text, size_t length) {
-  if (!ackUid[0]) return;                        // 기다리는 답이 없다
   JsonDocument doc;
   if (deserializeJson(doc, text, length)) return;
-  if (strcmp(doc["uid"] | "", ackUid))  return;  // 다른 카드의 답(또는 uid 가 없는 상태 알림)
-  const bool known = doc["known"] | false;
-  const char *note = doc["note"] | "";
-  Serial.printf("[결과] %s %s · %ld P%s%s\n", ackUid, (const char *)(doc["name"] | ""),
-                (long)(doc["points"] | 0L), note[0] ? " · " : "", note);
-  ackUid[0] = '\0';
-  if (known) sndOk(); else sndFail();            // 서버가 아는 키링이라야 '삑'
+
+  // ① 디스플레이가 읽어 달라고 보낸 한 줄. 아는 문구가 아니면 sound.cpp 가 조용히 지나간다.
+  const char *say = doc["say"] | "";
+  if (say[0]) {
+    Serial.printf("[소리] 디스플레이: %s\n", say);
+    soundSayNote(say, 0);
+    return;
+  }
+
+  const char *uid = doc["uid"] | "";
+  if (!uid[0]) return;                           // uid 가 없는 상태 알림 — 쓸 것이 없다
+  const bool  known  = doc["known"]  | false;
+  const char *note   = doc["note"]   | "";
+  const long  points = doc["points"] | 0L;
+
+  // ② 기다리던 답
+  if (ackUid[0]) {
+    if (strcmp(uid, ackUid)) return;             // 다른 카드의 답 — 버린다
+    Serial.printf("[결과] %s %s · %ld P%s%s\n", ackUid, (const char *)(doc["name"] | ""),
+                  points, note[0] ? " · " : "", note);
+    ackUid[0] = '\0';
+#if BEEP_ON_REPLY
+    if (known) sndOk(); else sndFail();          // 서버가 아는 키링이라야 '삑'
+#else
+    (void)known;                                 // 부저를 끄고 말만 할 때는 쓰지 않는다
+#endif
+    // 말은 **부저 뒤**다 — beep 가 delay 로 버티는 동안 모듈은 제 UART 로 혼자 읽는다.
+    if (sayOnce(uid, note, points)) soundSayNote(note, points);
+    return;
+  }
+
+  // ③ 묻지 않았는데 온 것
+  if (!sayOnce(uid, note, points)) return;
+  Serial.printf("[알림] %s %s · %ld P%s%s\n", uid, (const char *)(doc["name"] | ""),
+                points, note[0] ? " · " : "", note);
+  soundSayNote(note, points);
 }
 
 // 답이 오지 않으면(디스플레이가 서버에 못 물었거나 끊겼다) 기다림을 접고 실패음을 낸다.
@@ -131,6 +204,10 @@ static void ackService() {
   Serial.printf("[결과] %s — 디스플레이가 답하지 않음\n", ackUid);
   ackUid[0] = '\0';
   sndFail();
+  // '서버에 물어보지 못했어요' 를 빌려 쓴다. 정확히는 **디스플레이**가 답하지 않은 것이지만,
+  // 카드를 댄 아이에게는 같은 일이다(조회가 안 됐다). 토막을 더 굽지 않으려고 이렇게 둔다 —
+  // 구별이 필요해지면 /01/014 에 '잠시 뒤에 다시 대 주세요' 를 얹고 여기만 바꾸면 된다.
+  soundSay(SND_NO_SERVER);
 }
 
 // ── 선 (I2C 슬레이브) — 1순위 길 ────────────────────────────────────
@@ -481,11 +558,20 @@ static void nfcBegin() {
     Serial.printf("[NFC] PN532 준비됨 (v%d.%d, SPI 폴링)\n",
                   (int)((ver >> 16) & 0xFF), (int)((ver >> 8) & 0xFF));
     sndReady();
+#if SOUND_SAY_BOOT
+    // 상자가 살아 있다는 신호. 다시 찾기에 성공했을 때도 울리는데 그게 맞다 —
+    // 그때까지는 카드를 읽지 못하고 있었다.
+    soundSay(SND_READER_INIT);
+#endif
   } else {
     Serial.printf("[NFC] PN532 를 못 찾음 — 배선(SCK=%d, MISO=%d, MOSI=%d, SS=%d)·모듈 딥스위치가 SPI 인지 확인. 5초 뒤 다시\n",
                   PIN_NFC_SCK, PIN_NFC_MISO, PIN_NFC_MOSI, PIN_NFC_SS);
     nfcRetryAt = millis() + 5000;
-    if (!nfcScanned) { nfcScanned = true; rawProbe(); }
+    if (!nfcScanned) {
+      nfcScanned = true;
+      rawProbe();
+      soundSay(SND_READER_FAIL);   // 5초마다 되풀이하지 않는다 — 처음 한 번만
+    }
   }
 }
 
@@ -563,6 +649,13 @@ static void handleLine(char *s) {
   } else if (!strcmp(s, "beep")) {
     Serial.println("[부저] 삑 · 삐-삐 · 삐리");
     sndOk(); delay(400); sndFail(); delay(400); sndReady();
+  } else if (!strcmp(s, "voice")) {
+    soundTestNext();             // 한 번 부를 때마다 다음 토막 — 번호를 귀로 센다
+  } else if (!strncmp(s, "say ", 4)) {
+    // 디스플레이가 보내 오는 것과 **같은 길**로 읽는다 — 표(NOTE_CLIPS)에 그 문구가
+    // 있는지까지 함께 시험된다. 없으면 "읽을 토막이 없다" 가 찍힌다.
+    Serial.printf("[소리] say \"%s\"\n", s + 4);
+    soundSayNote(s + 4, 0);
   } else if (!strcmp(s, "probe")) {
     nfcProbe();
   } else if (!strncmp(s, "rty ", 4)) {
@@ -602,6 +695,7 @@ static void handleLine(char *s) {
                   radioWhere, nfcReady ? "준비됨" : "없음");
     Serial.printf("[상태] CPU %uMHz · 폴링 %lums · 재시도 0x%02X\n",
                   (unsigned)getCpuFrequencyMhz(), (unsigned long)nfcPollEvery, NFC_RETRIES);
+    soundReport();
   } else {
     for (char *p = s; *p; p++) *p = toupper(*p);  // UID 는 대문자로
     handleTag(s);
@@ -627,6 +721,15 @@ void setup() {
                 (unsigned)getCpuFrequencyMhz(), (unsigned long)nfcPollEvery, NFC_RETRIES);
 
   if (PIN_BUZZER >= 0) { pinMode(PIN_BUZZER, OUTPUT); digitalWrite(PIN_BUZZER, LOW); }
+
+  // 소리를 **PN532 보다 먼저** 연다 — 모듈이 스스로 서는 데 1.5초가 걸리는데,
+  // 그 기다림을 PN532 를 찾는 동안에 겹쳐 치운다(soundBegin 은 붙잡지 않는다).
+  soundBegin();
+#if SOUND_ENABLE
+  Serial.printf("[소리] DFPlayer — TX GPIO%d → 모듈 RX · RX GPIO%d ← 모듈 TX · 음량 %d/30\n",
+                DF_TX_PIN, DF_RX_PIN, SOUND_VOLUME);
+#endif
+
   spiStart();
   nfcBegin();
 
@@ -650,6 +753,7 @@ void setup() {
 }
 
 void loop() {
+  soundLoop();                   // 다 읽은 토막 다음 것을 밀어 넣는다(기다리지 않는다)
   linkService();                 // 1순위 길 — 들어온 답을 처리하고 살아 있는지 물어본다
   radioGate();                   // 선이 오래 조용하면 그제서야 라디오를 켠다
 

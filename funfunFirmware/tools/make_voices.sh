@@ -16,6 +16,8 @@
 #   /03/001.mp3 … /03/101.mp3    0~100 통째 (번호 = 수 + 1)
 #
 # ★ 번호와 대본은 src/sound.h(SndClip)·src/sound.cpp(SNDN_*) 와 **같아야 한다.**
+#   nfcProject 도 이 카드를 그대로 쓴다(소리는 리더 쪽에 달렸다 —
+#   ../nfcProject/slave/src/sound.{h,cpp}). 번호를 바꾸면 그 두 벌을 함께 고칠 것.
 #   한쪽만 고치면 엉뚱한 말이 나온다. 대본을 화면 글자와 같게 둔 까닭은 sound.h 머리말에.
 #   다른 데는 두 곳뿐이다 — 'PN532' 는 '리더' 로, 'WiFi' 는 '와이파이' 로 읽힌다.
 set -euo pipefail
