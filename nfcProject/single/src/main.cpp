@@ -123,6 +123,7 @@
 //   t 시험 NFC 화면(카드·서버 없이 이름·포인트·기분을 띄워 글자를 본다 — 누를 때마다 다음 보기)
 //   g 불러오는 중 고리를 3초 돌려 본다(서버 없이 확인용)
 //   b 소리 시험(삑 · 삐-삐 · 삐리) · f PN532 로 8초 동안 직접 카드를 훑어 본다
+//   v 화면 색 시험(민무늬 여섯 색을 차례로 띄운다 — 색차례와 자글거림을 가른다)
 //
 // ── 그림 바꾸기 ─────────────────────────────────────────────────────
 // 그림 헤더는 tools/img2rgb565_dither.py 로 만든다(v1.0 머리말 참고). 자기 그림으로 바꾸려면
@@ -140,6 +141,7 @@
 #include <SD_MMC.h>             // microSD (SDMMC 1-bit) 저장
 #include <U8g2lib.h>             // 한글 u8g2 폰트(굴림·quan7)·UTF8 출력을 켜고, 굴림 폰트도 여기서 온다
 #include <Arduino_GFX_Library.h>
+#include "st7701_hl021_init.h"
 #include "config.h"              // WIFI_SSID · WIFI_PASSWORD · MDNS_HOSTNAME · WS_PORT
 #include "useEnable.h"           // USEENABLE[480×480]  — 사용 활성(대기 화면의 첫 장)
 #include "connected.h"           // CONNECTED[50×35] — 연결 아이콘(와이파이에 붙었을 때만 겹친다)
@@ -209,13 +211,13 @@ static void backlightOn(uint8_t level) {
   }
 }
 
-// ── 화면 객체 (v1.0 과 동일한 값) ───────────────────────────────────
+// ── 화면 객체 ──────────────────────────────────────────────────────
 Arduino_XL9535SWSPI *bus = new Arduino_XL9535SWSPI(
     PIN_I2C_SDA, PIN_I2C_SCL,
     2 /* 전원 인에이블 */, 3 /* CS */, 5 /* SCK */, 4 /* MOSI */);
 
-// 픽셀 클럭 8MHz · 중계 버퍼 열 줄 — 화면이 자글거리는 것을 막는다(v1.0 PanelTFT 와 같다).
-static const int32_t PCLK_HZ      = 8000000L;
+// HL021TWV9009ANT 데이터시트의 RGB 타이밍: 17~27MHz, typ. 20MHz.
+static const int32_t PCLK_HZ      = 20000000L;
 static const int     BOUNCE_LINES = 20;   // 열 줄 → 스무 줄. 인터럽트가 늦어도 버틸 여유를 늘린다
                                           // (내장 RAM 을 20KB 쯤 더 쓴다 — 지금 270KB 가 논다)
 
@@ -224,8 +226,9 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
     21 /* R0 */, 18 /* R1 */, 17 /* R2 */, 16 /* R3 */, 15 /* R4 */,
     14 /* G0 */, 13 /* G1 */, 12 /* G2 */, 11 /* G3 */, 10 /* G4 */, 9 /* G5 */,
     7  /* B0 */, 6  /* B1 */, 5  /* B2 */, 3  /* B3 */, 2  /* B4 */,
-    1 /* hsync_polarity */, 50 /* hsync_front_porch */, 1 /* hsync_pulse_width */, 30 /* hsync_back_porch */,
-    1 /* vsync_polarity */, 20 /* vsync_front_porch */, 1 /* vsync_pulse_width */, 30 /* vsync_back_porch */,
+    // 데이터시트의 HSync typ(20)이 max(8)보다 커서 허용 범위 안의 8을 사용한다.
+    1 /* hsync_polarity */, 60 /* hsync_front_porch */, 8 /* hsync_pulse_width */, 60 /* hsync_back_porch */,
+    1 /* vsync_polarity */, 20 /* vsync_front_porch */, 4 /* vsync_pulse_width */, 20 /* vsync_back_porch */,
     1 /* pclk_active_neg */,
     PCLK_HZ /* 픽셀 클럭 */, false /* useBigEndian */,
     0 /* de_idle_high */, 0 /* pclk_idle_high */,
@@ -234,7 +237,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
 Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
     480, 480, rgbpanel, 0 /* 회전 */, true /* 그릴 때마다 바로 반영 */,
     bus, GFX_NOT_DEFINED /* RST */,
-    st7701_type4_init_operations, sizeof(st7701_type4_init_operations));
+    st7701_hl021_init_operations, sizeof(st7701_hl021_init_operations));
 
 // ── WebSocket 서버 ──────────────────────────────────────────────────
 WebSocketsServer webSocket = WebSocketsServer(WS_PORT);
@@ -1130,6 +1133,28 @@ static void showNfc(const char *uid, const char *name, long points, bool known,
   nfcUntil = millis() + NFC_SHOW_MS;
   drawNfc(photo, nfcName, points, nfcNote, nfcMood, nfcMoodIcon);
   sendState();
+}
+
+// 색·떨림 시험 — 시리얼 'v'. **민무늬 한 색으로 화면을 가득 채운다**. 그림이 없으니
+// 화면 탈만 남아, 두 가지를 한자리에서 가른다.
+//   1) 색차례  "빨강" 이라 찍힐 때 정말 빨간가. 파랗게 보이면 빨강↔파랑이 뒤바뀐 것이고,
+//              고칠 자리는 st7701_hl021_init.h 의 0x36(MADCTL) bit3 이다(0x00=RGB·0x08=BGR).
+//   2) 자글거림 민무늬 색에서도 자글거리면 **그림을 흘려보내는 쪽**이 못 따라가는 것이다 —
+//              픽셀클럭(PCLK_HZ)을 낮추거나 중계버퍼(BOUNCE_LINES)를 키워야 한다.
+//              민무늬는 멀쩡한데 사진만 자글거린다면 그것은 탈이 아니라, 사진을 RGB565 로
+//              줄이며 뿌려 놓은 디더링 점이다(tools/img2rgb565_dither.py).
+static void colorBarTest() {
+  static const struct { const char *name; uint16_t c; } STEPS[] = {
+    {"빨강", 0xF800}, {"초록", 0x07E0}, {"파랑", 0x001F},
+    {"노랑", 0xFFE0}, {"하양", 0xFFFF}, {"회색", 0x8410},
+  };
+  for (const auto &s : STEPS) {
+    Serial.printf("[화면시험] %s (0x%04X)\n", s.name, s.c);
+    gfx->fillScreen(s.c);
+    delay(1500);                               // delay 는 쉬는 것이라 그동안 일꾼이 돈다
+  }
+  Serial.println("[화면시험] 끝 — 대기 화면으로 돌아갑니다");
+  goIdle();
 }
 
 // 시험 화면 — 카드도 서버도 없이 NFC 화면을 띄운다(글자 크기·자리를 눈으로 보려고).
@@ -2183,8 +2208,9 @@ void loop() {
         sndOk(); delay(400); sndFail(); delay(400); sndReady();
         break;
       case 'f': case 'F': nfcProbe(); break;       // PN532 로 8초 동안 직접 카드를 훑어 본다
+      case 'v': case 'V': colorBarTest(); break;  // 민무늬 색으로 화면 탈(색차례·자글거림)을 가른다
       case 'r': case 'R': Serial.println("[명령] 재부팅합니다..."); Serial.flush(); ESP.restart(); break;
-      case '?':           Serial.println("[명령] n 다음 · p 이전 · h 활성 · s 사진 목록 · l SD 목록 · c 설정 받기 · i 상태 · t 시험 화면 · g 고리 · b 소리 · f 카드 훑기 · r 재부팅"); break;
+      case '?':           Serial.println("[명령] n 다음 · p 이전 · h 활성 · s 사진 목록 · l SD 목록 · c 설정 받기 · i 상태 · t 시험 화면 · g 고리 · b 소리 · f 카드 훑기 · v 화면 색 · r 재부팅"); break;
       default: break;
     }
   }
