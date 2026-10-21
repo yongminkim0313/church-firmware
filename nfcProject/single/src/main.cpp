@@ -360,7 +360,7 @@ static char    nfcUid[32] = "";
 static char    nfcName[40] = "";  // 지금 NFC 화면에 띄운 이름·잔액·한 줄 안내 — 붙은 리더에게 그대로 알려 준다
 static long    nfcPoints   = 0;
 static bool    nfcKnown    = false;
-static char    nfcNote[32] = "";
+static char    nfcNote[64] = "";   // 서버가 보내는 거절 안내가 들어온다(한글 스무 자쯤)
 // 아이가 펀펀포인트 앱이나 조회 화면에 적어 둔 '지금 기분' 한 줄. 서버가 이모티콘을 한국어
 // 이름으로 바꿔 보내 주므로(who.status.label) 여기 담기는 것은 **그릴 수 있는 글자뿐**이다 —
 // 이 화면의 폰트에는 이모티콘 글리프가 없어서, 😀 가 그대로 오면 네모(두부)가 뜬다.
@@ -1598,7 +1598,7 @@ static bool lookupTalent(const char *uid, char *name, size_t nameCap, long *poin
 // 기기는 현장에 놓인 물건이라 요청을 흉내 내기 쉬운데, 값이 서버에만 있으면 그래 봐야
 // 관리자가 정한 범위를 벗어나지 못한다(v1.0 리더와 같은 규칙).
 static bool attendEarn(const char *uid, char *name, size_t nameCap, long *points, long *delta,
-                       Mood *mood = nullptr) {
+                       Mood *mood = nullptr, char *deny = nullptr, size_t denyCap = 0) {
   Spinner spin;
   if (WiFi.status() != WL_CONNECTED) return false;
   char url[160];
@@ -1617,6 +1617,14 @@ static bool attendEarn(const char *uid, char *name, size_t nameCap, long *points
   http.end();
   if (code != HTTP_CODE_OK) {
     Serial.printf("[출석] 지급 실패 code=%d %s\n", code, body.c_str());
+    // 403 은 **고장이 아니라 때가 아닌 것**이다 — 출석 가능 시간대(요일·시간) 밖이거나
+    // 포인트가 없는 시간대다. 서버가 아이에게 할 말로 짧게 돌려주므로(서버의
+    // talentConfigV2.openAt) 그대로 화면에 띄운다. 400(설정이 빠졌다)은 관리자에게
+    // 하는 말이라 띄우지 않는다 — 줄 선 아이에게 보일 글이 아니다.
+    if (code == 403 && deny && denyCap) {
+      JsonDocument err;
+      if (!deserializeJson(err, body)) copyJsonSafe(deny, denyCap, err["message"] | "");
+    }
     return false;
   }
 
@@ -1691,6 +1699,9 @@ static void processTag(const char *uid) {
   moodSet(&mood, "", "", "");
   long points = 0, delta = 0;
   bool known = false;
+  // 서버가 출석을 거절하며 보낸 까닭(출석 시간이 아니다 / 포인트 없는 시간대다).
+  // 비어 있으면 거절이 아니었다는 뜻이다.
+  char deny[64] = "";
 
   // 출석모드 — 카드를 고르지 않았으면 지급하지 않는다(관리자 화면이 경고로 알린다).
   if (cfgAttendMode && cfgAttendCard[0]) {
@@ -1701,7 +1712,7 @@ static void processTag(const char *uid) {
         showNfc(uid, "", 0, false, "이미 출석했어요");
       return;
     }
-    if (attendEarn(uid, name, sizeof(name), &points, &delta, &mood)) {
+    if (attendEarn(uid, name, sizeof(name), &points, &delta, &mood, deny, sizeof(deny))) {
       rememberAttend(uid);
       char note[32];
       snprintf(note, sizeof(note), "출석 완료 +%ldP", delta);
@@ -1715,7 +1726,9 @@ static void processTag(const char *uid) {
 
   if (lookupTalent(uid, name, sizeof(name), &points, &known, &mood)) {
     if (!known) reportSeen(uid);   // 서버에 없는 키링 — '미등록카드' 에 뜨게 알린다
-    showNfc(uid, name, points, known, known ? "" : "등록되지 않은 키링", &mood);
+    // 거절당했으면 그 까닭을 띄운다. 사진·잔액은 그대로 보여 준다 — 아무 반응이
+    // 없으면 아이는 기기가 고장난 줄 알고 계속 카드를 댄다.
+    showNfc(uid, name, points, known, deny[0] ? deny : (known ? "" : "등록되지 않은 키링"), &mood);
   } else {
     showNfc(uid, "", 0, false, "서버에 물어보지 못했어요");
   }

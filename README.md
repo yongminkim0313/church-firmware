@@ -14,9 +14,9 @@
 | `nfcProject/master` | LILYGO T-RGB 2.1" 원형 (ESP32-S3 · ST7701S 480×480 · CST820 터치) | **화면만** 맡는다. 카드는 건너편 리더(`slave`)가 읽어 선(I2C)이나 라디오(ESP-NOW)로 UID 를 넘긴다 |
 | `nfcProject/slave` | ESP32-C3 SuperMini + PN532(SPI) + 부저 | **리더만** 맡는다. 화면이 없고, 읽은 UID 를 넘기고 소리로 결과를 알린다 |
 | `nfcProject/single` | LILYGO T-RGB 2.1" 원형 + PN532(I2C) + 스피커 | **master + slave 를 한 보드로 합친 것.** 읽고·묻고·그리고·소리까지 혼자 한다 |
-| `LCDTest` | ESP32-S3-N16R8 + GC9A01 240×240 원형(SPI) + PN532(SPI) | `master` 를 **사진 없이 글자만**으로 옮긴 판. microSD 도 터치도 없다(BOOT 버튼으로 대신) |
+| `funfunFirmware` | ESP32-S3-N16R8 + GC9A01 240×240 원형(SPI) + PN532(SPI) | `master` 를 **사진 없이 글자만**으로 옮긴 판. microSD 도 터치도 없다(BOOT 버튼으로 대신) |
 
-세 판(`master`·`single`·`LCDTest`)이 서버와 직접 말한다 — 조회·지급, 설정 받기,
+세 판(`master`·`single`·`funfunFirmware`)이 서버와 직접 말한다 — 조회·지급, 설정 받기,
 그리고 `/ws/device` 로 붙어 변화를 받는다. `slave` 는 서버를 모른다.
 
 ## 받아 간 뒤 한 번 — 인증정보
@@ -42,7 +42,7 @@ cp secrets/ChurchSecrets.example.h secrets/ChurchSecrets.h
 ## 굽기
 
 ```bash
-cd nfcProject/master    # 또는 single · slave · LCDTest
+cd nfcProject/master    # 또는 single · slave  (funfunFirmware 는 저장소 바로 아래다)
 pio run                 # 빌드만
 pio run -t upload       # 구워 넣기
 pio device monitor      # 115200
@@ -59,6 +59,7 @@ pio device monitor      # 115200
 | 자리 | 서버의 짝 |
 |---|---|
 | `GET /api/talent/config/v2` 로 받는 설정 | `talent/talentConfigV2.js` — 기본값이 바뀌면 `config.h` 의 `BL_LEVEL` 등도 맞출 것 |
+| `POST /api/talent/earn` 이 **403** 이면 안내문을 띄운다 | 서버의 `attendanceWhat` — 출석 가능 시간대(요일·시간) 밖이거나 포인트 없는 구간이다. 그 `message` 가 그대로 화면에 뜬다(`nfcNote` 는 64바이트 = 한글 스무 자쯤) |
 | `{"state":"config"}` 를 받으면 설정을 다시 받는다 | `talent/deviceHub.js` 의 `COMMANDS.config` — 값이 아니라 "다시 물어라" 만 온다 |
 | 상태 알림(`buildState`)의 `attend`·`mode`·`note` | 관리 화면 상단 바의 기기 풍선(`NfcDisplayChip.vue`)이 그대로 그린다 |
 | 사진·캐릭터 그림의 크기(`TALENT_PX`·`MOOD_ICON_PX`) | `talent/talentPhoto.js` 의 `DEVICE_SIZES`·`CHAR_PX` — 어긋나면 기기가 그림을 버린다 |

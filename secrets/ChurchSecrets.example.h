@@ -4,7 +4,7 @@
 // 받아 간 뒤 한 번: cp secrets/ChurchSecrets.example.h secrets/ChurchSecrets.h
 // 그다음 아래 값을 제 망·제 교회의 것으로 채운다.
 //
-// 세 프로젝트(LCDTest · nfcProject/master · nfcProject/single)가 이 한 파일을 함께
+// 세 프로젝트(funfunFirmware · nfcProject/master · nfcProject/single)가 이 한 파일을 함께
 // 본다 — 같은 망, 같은 서버, 같은 기기 키다. 프로젝트마다 한 벌씩 두면 와이파이
 // 비밀번호를 바꿀 때 한 곳을 빠뜨리고, 그 기기만 조용히 못 붙는다.
 // 들어가는 길은 platformio.ini 의 build_flags = -I <이 폴더> 다.

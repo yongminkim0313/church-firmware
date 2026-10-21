@@ -1,4 +1,4 @@
-// LCDTest — PN532 NFC 리더(SPI) + GC9A01 원형 디스플레이(SPI), 글자만으로 그리는 판
+// funfunFirmware — PN532 NFC 리더(SPI) + GC9A01 원형 디스플레이(SPI), 글자만으로 그리는 판
 //
 // 보드: ESP32-S3-N16R8 · GC9A01 240×240 원형 IPS(SPI) · PN532(SPI)
 // nfcProject/master 의 기능을 이 하드웨어에 옮긴 것이다. 다른 점만 먼저 적는다:
@@ -223,7 +223,7 @@ static char nfcUid[32] = "";
 static char nfcName[40] = "";
 static long nfcPoints = 0;
 static bool nfcKnown = false;
-static char nfcNote[32] = "";
+static char nfcNote[64] = "";   // 서버가 보내는 거절 안내가 들어온다(한글 스무 자쯤)
 // 아이가 앱·조회 화면에 적어 둔 '지금 기분' 한 줄. 서버가 이모티콘을 한국어 이름으로
 // 바꿔 보내 주므로(who.status.label) 여기 담기는 것은 그릴 수 있는 글자뿐이다 —
 // 폰트에 이모티콘 글리프가 없어 😀 가 그대로 오면 네모(두부)가 뜬다.
@@ -312,7 +312,7 @@ static AttendSeen attendSeen[ATTEND_RECENT_MAX];
 static int attendSeenCount = 0;
 
 // PN532 로 읽은 마지막 카드 — 올려둔 동안 서버를 반복해 찌르지 않으려고 기억한다
-static uint8_t heldUid[7] = {0};
+static uint8_t heldUid[10] = {0};   // ISO14443A UID 는 10바이트까지다(4·7·10)
 static uint8_t heldUidLen = 0;
 static uint32_t heldSeenAt = 0;   // 마지막으로 **읽힌** 때(올려둔 동안 계속 갱신된다)
 static uint32_t heldTaggedAt = 0;  // 마지막으로 **센** 때(새 태그로 받아들인 때)
@@ -1420,7 +1420,7 @@ static bool lookupTalent(const char *uid, char *name, size_t nameCap, long *poin
 // 기기는 현장에 놓인 물건이라 요청을 흉내 내기 쉬운데, 값이 서버에만 있으면 그래 봐야
 // 그 카드에 적힌 만큼만 올라간다.
 static bool attendEarn(const char *uid, char *name, size_t nameCap, long *points, long *delta,
-                       Mood *mood = nullptr) {
+                       Mood *mood = nullptr, char *deny = nullptr, size_t denyCap = 0) {
   Spinner spin;
   if (WiFi.status() != WL_CONNECTED) return false;
 
@@ -1439,6 +1439,14 @@ static bool attendEarn(const char *uid, char *name, size_t nameCap, long *points
   http.end();
   if (code != HTTP_CODE_OK) {
     Serial.printf("[출석] 지급 실패 code=%d %s\n", code, body.c_str());
+    // 403 은 **고장이 아니라 때가 아닌 것**이다 — 출석 가능 시간대(요일·시간) 밖이거나
+    // 포인트가 없는 시간대다. 서버가 아이에게 할 말로 짧게 돌려주므로(서버의
+    // talentConfigV2.openAt) 그대로 화면에 띄운다. 400(설정이 빠졌다)은 관리자에게
+    // 하는 말이라 띄우지 않는다 — 줄 선 아이에게 보일 글이 아니다.
+    if (code == 403 && deny && denyCap) {
+      JsonDocument err;
+      if (!deserializeJson(err, body)) copyJsonSafe(deny, denyCap, err["message"] | "");
+    }
     return false;
   }
 
@@ -1531,6 +1539,9 @@ static void processTag(const char *uid) {
   mood.line[0] = '\0';
   long points = 0, delta = 0;
   bool known = false;
+  // 서버가 출석을 거절하며 보낸 까닭(출석 시간이 아니다 / 포인트 없는 시간대다).
+  // 비어 있으면 거절이 아니었다는 뜻이다.
+  char deny[64] = "";
 
   // 출석모드 — 카드를 고르지 않았으면 지급하지 않는다(관리자 화면이 경고로 알린다).
   if (cfgAttendMode && cfgAttendCard[0]) {
@@ -1542,7 +1553,7 @@ static void processTag(const char *uid) {
       }
       return;
     }
-    if (attendEarn(uid, name, sizeof(name), &points, &delta, &mood)) {
+    if (attendEarn(uid, name, sizeof(name), &points, &delta, &mood, deny, sizeof(deny))) {
       rememberAttend(uid);
       char note[32];
       snprintf(note, sizeof(note), "출석 완료 +%ldP", delta);
@@ -1556,7 +1567,9 @@ static void processTag(const char *uid) {
 
   if (lookupTalent(uid, name, sizeof(name), &points, &known, &mood)) {
     if (!known) reportSeen(uid);  // 서버에 없는 키링 — '미등록카드' 에 뜨게 알린다
-    showNfc(uid, name, points, known, known ? "" : "등록되지 않은 키링", &mood);
+    // 거절당했으면 그 까닭을 띄운다. 사진·잔액은 그대로 보여 준다 — 아무 반응이
+    // 없으면 아이는 기기가 고장난 줄 알고 계속 카드를 댄다.
+    showNfc(uid, name, points, known, deny[0] ? deny : (known ? "" : "등록되지 않은 키링"), &mood);
   } else {
     showNfc(uid, "", 0, false, "서버에 물어보지 못했어요");
   }
@@ -1815,11 +1828,23 @@ static void probePin(uint8_t pin, const char *name) {
 //   라이브러리가 thread-safe 가 아니라, 다른 곳에서 nfc 를 부르면 같은 SPI 주고받기가
 //   서로 섞여 엉뚱한 응답을 읽는다.
 static void nfcScanOnce() {
-  uint8_t uid[7] = {0};
+  // ★ 버퍼를 넉넉히 잡는다. 라이브러리는 **응답이 말하는 길이만큼 먼저 복사하고 나서**
+  //   그 길이를 돌려준다(Adafruit_PN532::readDetectedPassiveTargetID 의 복사 고리는
+  //   우리가 준 버퍼 크기를 모른다). 7바이트짜리를 주면 10바이트 UID 카드 한 장,
+  //   어긋난 프레임 한 번에 스택이 넘친다 — 받고 나서 거르려면 그 전에 들어갈 자리가
+  //   있어야 한다. nfcProject 의 리더 판도 같은 까닭으로 255를 쓴다.
+  uint8_t uid[255] = {0};
   uint8_t uidLen = 0;
 
   if (!nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen, SCAN_TIMEOUT_MS)) return;
-  if (uidLen == 0 || uidLen > sizeof(uid)) return;
+  // ISO14443A UID 는 4·7·10 바이트뿐이다 —
+  //   4  교통카드·휴대폰(휴대폰은 댈 때마다 다른 UID 를 낸다)
+  //   7  우리 키링(NTAG213)
+  //   10 세 겹 UID
+  // 그 밖의 길이는 프레임이 어긋난 것이라 버린다.
+  // ★ 전에는 `uidLen > sizeof(uid)` 로 걸렀는데 버퍼가 7바이트여서, **10바이트 UID 는
+  //   스택을 넘긴 뒤에 조용히 버려졌다**(넘기는 쪽이 먼저다 — 위 ★). 이제 길이로 가른다.
+  if (uidLen != 4 && uidLen != 7 && uidLen != 10) return;
 
   const uint32_t now = millis();
   const bool sameCard = (uidLen == heldUidLen) && (memcmp(uid, heldUid, uidLen) == 0);
@@ -1909,7 +1934,7 @@ void setup() {
   delay(2000);  // USB CDC 가 올라올 때까지 대기
 
   Serial.println();
-  Serial.println("=== LCDTest — NFC UID -> 이름·잔액·기분 ===");
+  Serial.println("=== funfunFirmware — NFC UID -> 이름·잔액·기분 ===");
   Serial.printf("Display: FSPI  SCK=%d MOSI=%d CS=%d DC=%d RST=%d BLK=%d @ %ld Hz\n", TFT_SCK,
                 TFT_MOSI, TFT_CS, TFT_DC, TFT_RST, TFT_BLK, TFT_SPI_HZ);
   Serial.printf("PN532  : HSPI  SCK=%d MISO=%d MOSI=%d CS=%d\n", PN532_SCK, PN532_MISO, PN532_MOSI,
