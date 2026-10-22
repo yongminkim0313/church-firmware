@@ -29,8 +29,14 @@
 
 // 전원이 들어온 뒤 모듈이 스스로 설 때까지. 더 일찍 말을 걸면 그 명령은 사라진다.
 #define DF_BOOT_MS 1500
-// 리셋을 보낸 뒤 '섰다'(0x3F)를 기다리는 한도. 안 보내 주는 짝퉁이 있어 시간으로도 넘어간다.
-#define DF_RESET_MS 2000
+// 리셋을 보낸 뒤 **반드시** 기다리는 시간. 모듈이 다시 서는 데 1.5~3초가 걸리고 그 사이에
+// 받은 명령은 사라진다 — 하필 그것이 '저장소를 SD 로'(0x09)와 음량이라, 놓치면 되돌릴
+// 자리가 없다(둘 다 아래 상태 전이 **한 번**에만 나가고 다시 보내는 곳이 없다).
+#define DF_RESET_SETTLE_MS 1500
+// 그 뒤로 '섰다'(0x3F)를 더 기다리는 한도. 안 보내 주는 짝퉁이 있어 시간으로도 넘어간다.
+// ★ 2000 에서 3000 으로 늘렸다 — 한도가 모듈이 서는 시간보다 짧으면 깃발을 제대로
+//   내려 두어도 결국 재부팅 중에 0x09 를 보내게 된다(늘어나는 것은 부팅 안내뿐이다).
+#define DF_RESET_MS 3000
 // 명령과 명령 사이 쉼 — 몰아 보내면 뒤의 것을 흘린다.
 #define DF_CMD_GAP_MS 50
 // 한 토막이 이만큼 지나도 '다 읽었다' 가 안 오면 끝난 것으로 본다. 알림을 흘렸거나
@@ -74,7 +80,7 @@ static SndItem cur = {0, 0};  // 지금 읽고 있는 토막 — 오류가 어�
 
 enum SndState : uint8_t {
   ST_BOOT,   // 모듈이 설 때까지 기다린다
-  ST_RESET,  // 리셋을 보내고 '섰다' 를 기다린다
+  ST_RESET,  // '섰다' 를 기다린다 — 켤 때의 리셋 뒤, 그리고 모듈이 제멋대로 다시 섰을 때
   ST_SOURCE, // 저장소를 SD 로
   ST_VOLUME, // 음량
   ST_READY,  // 조용하다 — 줄에 있으면 바로 밀어 넣는다
@@ -88,6 +94,9 @@ static bool readySeen = false;  // 0x3F 를 받았나
 static uint8_t volume = SOUND_VOLUME;
 static uint32_t playedCount = 0;
 static uint32_t missedCount = 0;  // 알림 없이 빗장(DF_CLIP_MAX_MS)으로 넘어간 수
+// 모듈이 제멋대로 다시 선 수. 0 이 아니면 전원을 봐야 한다 — 틀려는 순간 전압이
+// 주저앉는다는 뜻이고, 그때마다 한마디가 끊긴다(모듈 VCC 옆 100µF · 5V 선 굵기).
+static uint32_t rebootCount = 0;
 
 static uint8_t rx[10];
 static uint8_t rxLen = 0;
@@ -103,11 +112,46 @@ static void dfCmd(uint8_t cmd, uint8_t ph, uint8_t pl) {
 }
 
 // ── 프레임 받기 ──────────────────────────────────────────────────
+static void qClear();  // 아래 '줄에 세우기' 에 있다 — 다시 선 모듈을 치울 때 쓴다
+
+// 0x40 이 싣고 온 까닭. 번호마다 손볼 자리가 달라서, 한 문장으로 뭉쳐 두면 엉뚱한 데를
+// 뒤지게 된다 — 0x01 은 모듈 사정이고 0x06 은 카드 사정이다.
+static const char *dfErrText(uint8_t pl) {
+  switch (pl) {
+    case 0x01:
+      return "모듈이 아직 준비 안 됨 — 틀려는 순간 전압이 주저앉았는지(VCC 옆 100µF) 보세요";
+    case 0x02: return "모듈이 잠들어 있다";
+    case 0x03: return "직렬 수신 오류 — 선이 잡음을 탔다(모듈 RX 에 1kΩ)";
+    case 0x04: return "체크섬 안 맞음";
+    case 0x05: return "트랙 번호가 범위를 넘음";
+    case 0x06: return "그 번호의 파일이 SD 에 없다 — 폴더가 두 자리('01')인지 보세요";
+    case 0x07: return "끼워 넣기 오류";
+    case 0x08: return "SD 를 읽지 못했다 — 카드가 빠졌거나 상했다";
+    default: return "모르는 까닭";
+  }
+}
+
 static void dfFrame(uint8_t cmd, uint8_t ph, uint8_t pl) {
   switch (cmd) {
     case DF_NOTIFY_READY:
       readySeen = true;
       Serial.printf("[소리] 모듈이 섰다 (저장소 0x%02X)\n", pl);
+      // ★ 이 줄이 **켤 때가 아니라 한참 뒤에** 오면 모듈이 제멋대로 다시 선 것이다 —
+      //   거의 틀려는 순간 전압이 주저앉아서다. 다시 선 모듈은 **저장소 선택과 음량을
+      //   잊는다.** 그대로 두면 그 뒤로 영영 조용하다 — 0x09 와 음량을 보내는 곳이
+      //   아래 상태 전이 한 번뿐이라, ESP 를 다시 켜야 소리가 돌아온다.
+      //   그래서 초기화 자리로 되돌린다. **리셋은 보내지 않는다** — 모듈은 방금 섰고,
+      //   정착 시간만 지켜 0x09·음량을 다시 보내면 된다.
+      //   줄은 비운다. 끊긴 그 한마디는 이미 중간에서 잘렸고, 다시 세워 두면 전압이
+      //   계속 주저앉는 상자에서 같은 말을 끝없이 더듬는다 — 다음 태깅부터 제대로
+      //   읽히는 쪽이 낫다.
+      if (state == ST_READY || state == ST_PLAY) {
+        rebootCount++;
+        Serial.println("[소리] 모듈이 다시 섰다 — 저장소·음량을 다시 보낸다 (전원을 보세요)");
+        qClear();
+        state = ST_RESET;
+        stepAt = millis();
+      }
       break;
     case DF_NOTIFY_FINISH:
       if (state == ST_PLAY) {
@@ -116,10 +160,12 @@ static void dfFrame(uint8_t cmd, uint8_t ph, uint8_t pl) {
       }
       break;
     case DF_NOTIFY_ERROR:
-      // 가장 흔한 것은 0x06 — 그 번호의 파일이 SD 에 없다. 토막을 늘리고 SD 에 복사하는
-      // 것을 잊으면 여기로 온다. 줄은 그대로 밀고 나간다(다음 토막은 있을 수 있다).
-      Serial.printf("[소리] 오류 0x%02X — /%02d/%03d 가 SD 에 있는지 보세요\n", pl, cur.folder,
-                    cur.track);
+      // 줄은 그대로 밀고 나간다(다음 토막은 있을 수 있다).
+      // ★ 0x01 뒤에 0x06 이 따라오는 것은 **카드 탈이 아니다** — 초기화가 안 끝난 모듈은
+      //   파일 색인이 없어 무엇을 물어도 '없다' 고 한다. 그때는 곧 0x3F 가 따라오고,
+      //   위 READY 가 초기화를 다시 돌린다.
+      Serial.printf("[소리] 오류 0x%02X (/%02d/%03d) — %s\n", pl, cur.folder, cur.track,
+                    dfErrText(pl));
       if (state == ST_PLAY) {
         state = ST_READY;
         endAt = millis();
@@ -140,6 +186,12 @@ static void dfFeed() {
     rxLen = 0;
     if (rx[9] == 0xEF) dfFrame(rx[3], rx[5], rx[6]);
   }
+}
+
+// 받아 둔 바이트를 통째로 버린다 — 리셋을 보내기 **전에** 묵은 알림을 치우는 데 쓴다.
+static void dfDrain() {
+  while (DF_SERIAL.available()) DF_SERIAL.read();
+  rxLen = 0;
 }
 
 // ── 줄에 세우기 ──────────────────────────────────────────────────
@@ -220,11 +272,23 @@ void soundLoop() {
     case ST_BOOT:
       // 전원이 들어온 뒤 모듈이 설 때까지. 그 전에 보낸 명령은 사라진다.
       if ((int32_t)(now - stepAt) < DF_BOOT_MS) return;
+      // ★ 묵은 알림을 버리고 깃발을 내린 **뒤에** 리셋을 보낸다. 모듈은 켜질 때 제
+      //   스스로 0x3F 를 한 번 보내는데, 그 바이트가 FIFO 에 앉아 있다가 이 함수 맨
+      //   앞의 dfFeed() 에서 읽히면 readySeen 이 리셋을 보내기도 전에 서 버린다.
+      //   그러면 아래 ST_RESET 이 '벌써 섰다' 로 보고 **기다리지 않고** 지나가, 0x09·
+      //   음량·첫 토막이 재부팅 중인 모듈에 떨어져 통째로 사라진다(그 셋은 다시
+      //   보내는 곳이 없다). setup 이 soundLoop 을 돌리지 않는 쪽에서는 그 묵은
+      //   바이트가 **늘** 쌓여 있으므로 어쩌다 한 번이 아니라 매번 그렇게 된다.
+      dfDrain();
+      readySeen = false;
       dfCmd(DF_CMD_RESET, 0, 0);
       state = ST_RESET;
       return;
     case ST_RESET:
-      // '섰다'(0x3F)가 오면 바로, 안 보내 주는 짝퉁이면 시간으로 넘어간다.
+      // 정착 시간은 '섰다' 가 와도 지킨다 — 그 알림은 모듈이 SD 를 다 읽기 전에 오는
+      // 것이 있어, 그것만 믿고 지나가면 0x09 가 또 허공에 떨어진다.
+      if ((int32_t)(now - stepAt) < DF_RESET_SETTLE_MS) return;
+      // 그 뒤로는 '섰다'(0x3F)가 오면 바로, 안 보내 주는 짝퉁이면 한도에서 넘어간다.
       if (!readySeen && (int32_t)(now - stepAt) < DF_RESET_MS) return;
       dfCmd(DF_CMD_SOURCE, 0, 0x02);  // microSD
       state = ST_SOURCE;
@@ -283,6 +347,11 @@ void soundStop() {
 void soundSay(uint8_t clip) {
   if (!clip) return;
   soundStop();
+  enq(SND_FOLDER, clip);
+}
+
+void soundSayMore(uint8_t clip) {
+  if (!clip) return;
   enq(SND_FOLDER, clip);
 }
 
@@ -369,10 +438,11 @@ void soundTestNext() {
 }
 
 void soundReport() {
-  static const char *NAMES[] = {"준비중", "리셋중", "저장소", "음량", "조용", "읽는중"};
-  Serial.printf("[소리] %s · 줄 %u토막 · 읽은 토막 %lu · 알림 못받음 %lu · 음량 %d/30\n",
+  static const char *NAMES[] = {"준비중", "서는중", "저장소", "음량", "조용", "읽는중"};
+  Serial.printf("[소리] %s · 줄 %u토막 · 읽은 토막 %lu · 알림 못받음 %lu · 다시 섬 %lu · "
+                "음량 %d/30\n",
                 NAMES[state], qCount, (unsigned long)playedCount, (unsigned long)missedCount,
-                volume);
+                (unsigned long)rebootCount, volume);
 }
 
 #else  // SOUND_ENABLE 0 — 모듈 없이 구울 때. 부르는 자리를 그대로 두고 아무 일도 안 한다.
@@ -381,6 +451,7 @@ void soundBegin() {}
 void soundLoop() {}
 void soundPump(uint32_t ms) { delay(ms); }
 void soundSay(uint8_t) {}
+void soundSayMore(uint8_t) {}
 void soundSayNote(const char *, long) {}
 void soundStop() {}
 void soundVolume(uint8_t) {}

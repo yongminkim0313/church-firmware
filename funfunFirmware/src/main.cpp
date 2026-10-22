@@ -8,6 +8,9 @@
 //   · 터치가 없다 — 보드의 BOOT 버튼으로 대신한다(짧게: 대기 화면 · 길게: 설정 받기).
 //   · 소리가 난다 — DFPlayer Mini(YX5200)가 미리 구워 둔 토막을 이어 읽는다.
 //     읽을 수 있는 말과 못 읽는 말, SD 짜임새는 sound.h 머리말에 있다.
+//   · 상태 불이 있다 — 보드에 달린 RGB LED 한 알을 빨강·노랑·초록으로 쓴다. 화면은
+//     아이 쪽을 보고 있어, 지나가는 교사에게 '지금 쓸 수 있나' 를 알리는 자리가 없었다.
+//     색이 무엇을 뜻하는지는 led.h 머리말에 있다.
 //
 // ── 화면 네 가지 ──────────────────────────────────────────────────
 //   대기   : 금색 고리가 돌며 "카드를 올려 주세요". 아래에 연결 상태를 한 줄로.
@@ -40,10 +43,21 @@
 //     VCC→3V3  GND→GND  SCK→GPIO9  MISO→GPIO10  MOSI→GPIO11  SS/CS→GPIO12
 //     IRQ·RSTO 미연결 · 모듈 모드 스위치를 SPI 로 (보통 SEL0=OFF, SEL1=ON)
 //   ※ GPIO3 은 이 보드에서 LOW 로 고착되어 쓰지 않는다.
+//   DFPlayer Mini(YX5200) — UART1
+//     VCC→5V  GND→GND  RX←GPIO17(1kΩ 직렬)  TX→GPIO18
+//     SPK_1/SPK_2 에 3W 꼬마 스피커(또는 DAC_L/DAC_R 를 앰프로) · BUSY 미연결
+//     ★ TX·RX 가 교차다. 그리고 RX 선(GPIO18)을 빠뜨리면 '다 읽었다' 알림이 오지
+//       않아 토막마다 5초를 기다려 말이 뚝뚝 끊긴다 — 소리는 나므로 찾기 어렵다.
+//     ★ 모듈 VCC 옆에 100µF 를 하나. 없으면 큰 소리에서 보드가 리셋된다.
+//     SD 는 FAT32 · 폴더는 두 자리('01') — 토막 표는 src/sound.h, 파일은 voices/.
+//   상태 불 — 보드에 이미 달려 있다(WS2812 한 알). 배선할 것이 없다.
+//     v1.1 은 GPIO48, v1.0 은 GPIO38 — config.h 의 LED_PIN.
 //
 // ── 시리얼 명령 (115200) ──────────────────────────────────────────
+//   ★ 보드의 USB-C 두 구멍 가운데 **'USB'(네이티브)** 쪽에 꽂아야 글자가 보인다.
+//     'UART'(CH343) 쪽은 굽기만 되고 조용하다 — 까닭은 platformio.ini 에.
 //   h 대기 화면 · c 설정 받기 · i 상태 · t 시험 화면 · g 고리 3초 · w 와이파이 다시
-//   s 최근 출석 목록 · v 소리 토막 하나씩 · r 재부팅 · ? 도움말
+//   s 최근 출석 목록 · v 소리 토막 하나씩 · l 상태 불 색 하나씩 · r 재부팅 · ? 도움말
 // ─────────────────────────────────────────────────────────────────
 
 #include <Adafruit_PN532.h>
@@ -60,6 +74,7 @@
 #include <WiFiClientSecure.h>
 
 #include "config.h"
+#include "led.h"
 #include "sound.h"
 
 // https 왕복·JSON·WebSocket 이 모두 loop 에서 돈다 — 기본 8KB 로는 빠듯하다.
@@ -733,11 +748,15 @@ static void spinnerTask(void *) {
 static void spinStart() {
   spinDepth++;
   spinWant = true;
+  ledBusy(true);  // 고리가 도는 동안 = 상태 불이 노란 동안
 }
 
 static void spinStop() {
   if (spinDepth > 0) spinDepth--;
-  if (spinDepth == 0) spinWant = false;
+  if (spinDepth == 0) {
+    spinWant = false;
+    ledBusy(false);
+  }
 }
 
 // 서버를 부르는 함수들이 들고 다니는 고리. 함수가 어디로 돌아가도 반드시 멈춘다.
@@ -947,6 +966,9 @@ static void showNfc(const char *uid, const char *name, long points, bool known,
   // 모듈은 한 번 틀어 주면 혼자 읽으므로 그동안 첫 토막이 흐른다.
   // 세 갈래(리더·ws·허브)가 모두 이 함수를 지나므로 소리를 거는 자리도 여기 하나다.
   soundSayNote(nfcNote, nfcPoints);
+  // 불도 여기 하나에서 고른다 — 세 갈래(리더·ws·허브)가 모두 이 함수를 지난다.
+  // 화면이 접히는 때(nfcUntil)와 같은 시각에 바탕색으로 내려온다.
+  ledTag(nfcNote, nfcKnown, NFC_SHOW_MS);
   drawNfc();
   sendState();
 }
@@ -970,6 +992,7 @@ static void showBulk(const char *headline, JsonVariantConst names) {
   uint32_t dur = BULK_SHOW_BASE_MS + (uint32_t)bulkCount * BULK_SHOW_PER_NAME_MS;
   if (dur > BULK_SHOW_MAX_MS) dur = BULK_SHOW_MAX_MS;
   nfcUntil = millis() + dur;
+  ledFlash(LED_OK, dur);
   drawBulk();
   sendState();
 }
@@ -1946,6 +1969,10 @@ void setup() {
   // 소리 모듈을 **여기서** 깨운다 — 전원이 들어온 뒤 스스로 서는 데 1.5초쯤 걸리는데,
   // 바로 아래 USB CDC 를 기다리는 2초 동안 그것이 지나간다(따로 기다리지 않는다).
   soundBegin();
+  // 불도 **여기서** 켠다 — 아래 2초를 기다리는 동안 노랑이 들어와, 전원을 꽂은 사람이
+  // 화면이 뜨기 전에도 상자가 살아 있는 것을 본다.
+  ledBegin();
+  ledBase(LED_BOOT);
   delay(2000);  // USB CDC 가 올라올 때까지 대기
 
   Serial.println();
@@ -1960,6 +1987,12 @@ void setup() {
                 DF_RX_PIN, SOUND_VOLUME);
 #else
   Serial.println("Sound  : 꺼 둠 (SOUND_ENABLE 0)");
+#endif
+#if LED_ENABLE
+  Serial.printf("Led    : GPIO%d (v1.0 보드는 38) · 빨강 안됨 · 노랑 하는중 · 초록 됐다\n",
+                LED_PIN);
+#else
+  Serial.println("Led    : 꺼 둠 (LED_ENABLE 0)");
 #endif
 
   gfxLock = xSemaphoreCreateMutex();
@@ -1988,6 +2021,8 @@ void setup() {
 
   if (!gfx->begin(TFT_SPI_HZ)) {
     Serial.println("ERROR: gfx->begin() 실패 — 디스플레이 배선을 확인하세요");
+    // 화면이 없으니 알릴 길은 불과 시리얼뿐이다 — 여기서 빨강이 제값을 한다.
+    ledBase(LED_FATAL);
     while (true) {
       delay(1000);
     }
@@ -2017,6 +2052,7 @@ void setup() {
   if (!nfc.begin()) {
     Serial.println("ERROR: PN532 SPI 버스를 열 수 없습니다");
     drawFatal("PN532", "SPI 초기화 실패");
+    ledBase(LED_FATAL);
     soundSay(SND_READER_FAIL);
     // 여기서 기기가 선다 — loop 가 안 도니 소리는 이쪽에서 돌려 줘야 읽힌다.
     while (true) {
@@ -2037,6 +2073,7 @@ void setup() {
     Serial.println("  - 모듈 모드 스위치가 SPI 인지 확인 (SEL0=OFF, SEL1=ON)");
     Serial.println("  - MISO/MOSI 가 서로 바뀌지 않았는지 확인");
     drawFatal("PN532", "찾을 수 없음");
+    ledBase(LED_FATAL);
     soundSay(SND_READER_FAIL);
     while (true) {
       soundPump(1000);
@@ -2085,7 +2122,10 @@ void setup() {
   WiFi.setSleep(false);
   drawStatus("WiFi 붙는 중");
 #if SOUND_SAY_BOOT
-  soundSay(SND_WIFI);
+  // ★ soundSay() 가 아니라 **이어 세우는** 쪽이다. 위에서 세운 '리더 준비 중' 이 아직
+  //   줄에 그대로 있다(setup 은 soundLoop 을 돌리지 않는다) — 끊는 쪽으로 부르면 그것이
+  //   버려져 늘 뒤의 한 토막만 읽혔다. loop 가 돌기 시작하면 둘이 차례로 읽힌다.
+  soundSayMore(SND_WIFI);
 #endif
 
   Serial.printf("Ready. free heap %lu\n", (unsigned long)ESP.getFreeHeap());
@@ -2094,6 +2134,7 @@ void setup() {
 void loop() {
   // 카드 스캔은 여기 없다 — 전용 일꾼(nfcTask)이 돈다. 읽은 UID 는 pendingUid 로 넘어온다.
   soundLoop();    // 다 읽은 토막 다음 것을 밀어 넣는다(기다리지 않는다)
+  ledLoop();      // 깜빡임을 돌리고, 잠깐 켜 둔 색이 지났으면 바탕으로 되돌린다
   wifiService();  // 와이파이 — 붙어 있으면 아무 일도 하지 않는다
 
   // 붙거나 끊기는 순간에만 다시 그린다(매번 그리면 화면이 깜빡인다)
@@ -2111,6 +2152,17 @@ void loop() {
     }
     if (mode == MODE_IDLE) drawIdle();  // 대기 화면일 때만 갱신(NFC 화면은 건드리지 않는다)
     sendState();
+  }
+
+  // 상태 불의 **바탕색** — '쓸 수 있나' 한 가지만 말한다. 붙었으면 초록, 끊겼으면
+  // 빨강 깜빡, 아직 한 번도 못 붙었으면 노랑(붙는 중)이다.
+  // 노랑을 거두는 자리가 둘이다: 한 번이라도 붙어 봤거나(serversUp — 붙은 뒤 한 번만
+  // 켜고 다시 내리지 않는다), 켠 뒤 LED_WIFI_GRACE_MS 가 지났거나. 뒤쪽이 없으면
+  // 공유기가 꺼져 있는 상자가 영원히 '준비 중' 인 척한다.
+  if (online) {
+    ledBase(LED_READY);
+  } else if (serversUp || millis() >= LED_WIFI_GRACE_MS) {
+    ledBase(LED_OFFLINE);
   }
 
   if (serversUp) webSocket.loop();  // 받은 것을 처리
@@ -2174,6 +2226,7 @@ void loop() {
                       online ? WiFi.localIP().toString().c_str() : "끊김",
                       (unsigned long)readCount, (unsigned long)ESP.getFreeHeap());
         soundReport();
+        ledReport();
         // 일꾼 스택에서 **한 번도 안 쓰고 남은** 바이트. 0 에 가까우면 넓혀야 한다.
         Serial.printf("[상태] nfc 일꾼 스택 여유 %u bytes (잡은 것 4096)\n",
                       nfcTaskHandle ? (unsigned)(uxTaskGetStackHighWaterMark(nfcTaskHandle) *
@@ -2233,6 +2286,12 @@ void loop() {
       case 'V':
         soundTestNext();
         break;
+      // 상태 불을 눈으로 확인한다 — 핀이 맞는지, 어느 색이 어느 상태인지.
+      // 한 번 누르면 그 색을 4초 보여 주고 제 상태로 돌아간다.
+      case 'l':
+      case 'L':
+        ledTestNext();
+        break;
       case 'w':
       case 'W':
         Serial.println("[명령] 와이파이 다시 붙기");
@@ -2248,7 +2307,7 @@ void loop() {
       case '?':
         Serial.println("[명령] h 대기 · c 설정 받기 · f 이름표 받기+목록 · d 실제 조회 시연 · "
                        "i 상태 · s 출석 목록 · x 사진 캐시 비우기 · t 시험 화면 · g 고리 · "
-                       "v 소리 토막 · w 와이파이 다시 · r 재부팅");
+                       "v 소리 토막 · l 상태 불 · w 와이파이 다시 · r 재부팅");
         break;
       default:
         break;
