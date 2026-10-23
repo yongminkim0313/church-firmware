@@ -27,6 +27,7 @@
 // ── 서버 설정 · 출석모드 (관리자 화면 '리더 설정 → v2.0') ─────────
 //   와이파이에 붙으면 GET /api/talent/config/v2 로 받고, 그 뒤 CONFIG_TTL_MS 마다 다시.
 //     · 밝기(backlight 1~16)     받는 즉시 백라이트 PWM 에 적용된다
+//                                (BLK 선이 없으면 아예 받지 않는다 — TFT_BLK_ENABLE)
 //     · 출석모드(attendanceMode) 켜면 키링을 댄 그 자리에서 바로 출석 포인트가 지급된다
 //     · 출석 카드(attendanceCard) 얼마를 어떤 사유로 줄지는 서버의 그 카드가 정한다.
 //                                비어 있으면 지급하지 않고 잔액만 띄운다.
@@ -39,6 +40,8 @@
 //   GC9A01 — FSPI(SPI2)
 //     VCC→3V3  GND→GND  SCL/SCK→GPIO15  SDA/MOSI→GPIO16
 //     CS→GPIO4  DC/RS→GPIO5  RST→GPIO6  BLK→GPIO7(PWM)
+//     ★ BLK 가 없는 모듈이면 그 선만 빼고 config.h 의 TFT_BLK_ENABLE 을 0 으로 —
+//       화면은 그대로 나온다(백라이트가 VCC 에 묶여 늘 최대 밝기다).
 //   PN532 — HSPI(SPI3), 디스플레이와 별도 버스
 //     VCC→3V3  GND→GND  SCK→GPIO9  MISO→GPIO10  MOSI→GPIO11  SS/CS→GPIO12
 //     IRQ·RSTO 미연결 · 모듈 모드 스위치를 SPI 로 (보통 SEL0=OFF, SEL1=ON)
@@ -84,7 +87,7 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 #define TFT_CS 4
 #define TFT_DC 5
 #define TFT_RST 6
-#define TFT_BLK 7
+#define TFT_BLK 7  // BLK 선이 없는 모듈이면 config.h 의 TFT_BLK_ENABLE 0 — 안 건드린다
 #define TFT_SCK 15
 #define TFT_MOSI 16
 
@@ -358,12 +361,22 @@ static int spinDepth = 0;
 
 // ── 백라이트 ─────────────────────────────────────────────────────
 // 서버가 주는 밝기는 1~16 이다. PWM 듀티로 옮긴다(1 이어도 보이게 바닥을 둔다).
+#if TFT_BLK_ENABLE
+static void backlightBegin() {
+  ledcAttach(TFT_BLK, BLK_FREQ, BLK_RES);
+  ledcWrite(TFT_BLK, 0);  // 패널을 초기화하는 동안은 내려 둔다
+}
 static void backlightOn(uint8_t level) {
   if (level < 1) level = 1;
   if (level > 16) level = 16;
   const uint8_t duty = (uint8_t)(16 + (uint16_t)(level - 1) * (255 - 16) / 15);
   ledcWrite(TFT_BLK, duty);
 }
+#else  // TFT_BLK_ENABLE 0 — BLK 선이 없는 모듈. 부르는 자리를 그대로 두고 아무 일도 안 한다.
+// 백라이트는 VCC 에 묶여 늘 최대 밝기다. 핀을 건드리지 않는다(PWM 도 잡지 않는다).
+static void backlightBegin() {}
+static void backlightOn(uint8_t) {}
+#endif
 
 // ── 글자 다루기 ──────────────────────────────────────────────────
 // 정수를 천 단위 콤마로 (1200 → "1,200")
@@ -1319,24 +1332,35 @@ static void fetchConfig() {
     return;
   }
 
-  const uint8_t bl = (uint8_t)(c["backlight"] | (int)cfgBacklight);
   const bool wasAttending = cfgAttendMode && cfgAttendCard[0];
   cfgAttendMode = c["attendanceMode"] | false;
   strlcpy(cfgAttendCard, c["attendanceCard"] | "", sizeof(cfgAttendCard));
 
+#if TFT_BLK_ENABLE
+  const uint8_t bl = (uint8_t)(c["backlight"] | (int)cfgBacklight);
   if (bl >= 1 && bl <= 16 && bl != cfgBacklight) {  // 바뀔 때만 흔든다
     cfgBacklight = bl;
     backlightOn(cfgBacklight);
   }
+#else
+  // BLK 선이 없으면 밝기를 **읽지도 않는다** — 들고 있으면 상태·로그에 그 값이 뜨고,
+  // 관리 화면에서 만진 사람은 기기가 받아 적용한 줄로 읽는다(config.h 의 TFT_BLK_ENABLE).
+#endif
   cfgGotOnce = true;
   // 출석모드가 실제로 바뀌었으면 붙어 있는 쪽(서버·브라우저)에 바로 알린다 —
   // 관리 화면의 스위치를 누른 사람이 "이 기기가 받았구나" 를 그 자리에서 본다.
   // 화면이 바뀐 것이 아니므로 바뀌지 않았을 때는 보내지 않는다(태깅마다 오는 것과
   // 달리 이 알림은 드물어야 한다).
   if (wasAttending != (cfgAttendMode && cfgAttendCard[0])) sendState();
+#if TFT_BLK_ENABLE
   Serial.printf("[설정] 밝기 %d/16 · 출석모드 %s%s%s\n", cfgBacklight,
                 cfgAttendMode ? "켜짐" : "꺼짐", cfgAttendMode ? " · 카드 " : "",
                 cfgAttendMode ? (cfgAttendCard[0] ? cfgAttendCard : "없음(지급 안 함)") : "");
+#else
+  Serial.printf("[설정] 밝기 조절 없음(BLK 미연결) · 출석모드 %s%s%s\n",
+                cfgAttendMode ? "켜짐" : "꺼짐", cfgAttendMode ? " · 카드 " : "",
+                cfgAttendMode ? (cfgAttendCard[0] ? cfgAttendCard : "없음(지급 안 함)") : "");
+#endif
 }
 
 // ── 이름표 받기 (UID → 사진 파일 이름) ──────────────────────────
@@ -2015,9 +2039,7 @@ void setup() {
 #endif
 #endif
 
-  // 백라이트는 꺼둔 채로 패널을 초기화한다 — 초기화 중의 깨진 화면이 안 보이게
-  ledcAttach(TFT_BLK, BLK_FREQ, BLK_RES);
-  ledcWrite(TFT_BLK, 0);
+  backlightBegin();  // BLK 선이 있으면 내려 둔다(없으면 아무 일도 안 한다)
 
   if (!gfx->begin(TFT_SPI_HZ)) {
     Serial.println("ERROR: gfx->begin() 실패 — 디스플레이 배선을 확인하세요");
@@ -2027,8 +2049,17 @@ void setup() {
       delay(1000);
     }
   }
+  // 초기화 중의 깨진 화면을 가린다 — **백라이트에 기대지 않는다.** BLK 선이 없는
+  // 모듈이 흔해서(config.h 의 TFT_BLK_ENABLE), 백라이트로 가리면 그 판에서는 그 한 번이
+  // 그대로 비친다. 패널 자체의 화면 끄기로 가리면 선이 있든 없든 똑같다.
+  // begin() 은 끝에서 화면을 켜므로(DISPON) 여기서 다시 끄고, 검게 칠한 뒤 켠다.
+  // ★ 라이브러리의 displayOff() 를 쓰지 않는 까닭: 그것은 화면 끄기(0x28)가 아니라
+  //   잠자기(SLPIN)여서 끄고 켜는 데 120ms+120ms 를 기다린다. 여기서 바라는 것은
+  //   '지금은 내보내지 말라' 한 마디뿐이다.
+  bus->sendCommand(GC9A01_DISPOFF);
   gfx->fillScreen(RGB565_BLACK);
   gfx->flush();
+  bus->sendCommand(GC9A01_DISPON);
   backlightOn(cfgBacklight);
 
   // 고리를 돌릴 일꾼. 서버 왕복이 loop 를 붙잡고 있는 동안에도 돌아간다.
@@ -2207,10 +2238,18 @@ void loop() {
         break;
       case 'i':
       case 'I':
+#if TFT_BLK_ENABLE
         Serial.printf("[상태] 기기 %s · 밝기 %d/16 · 출석모드 %s · 출석 카드 %s · 설정 %s\n",
                       TALENT_DEVICE_ID, cfgBacklight, cfgAttendMode ? "켜짐" : "꺼짐",
                       cfgAttendCard[0] ? cfgAttendCard : "없음",
                       cfgGotOnce ? "받음" : "못 받음(기본값으로 동작)");
+#else
+        Serial.printf("[상태] 기기 %s · 밝기 조절 없음(BLK 미연결) · 출석모드 %s · "
+                      "출석 카드 %s · 설정 %s\n",
+                      TALENT_DEVICE_ID, cfgAttendMode ? "켜짐" : "꺼짐",
+                      cfgAttendCard[0] ? cfgAttendCard : "없음",
+                      cfgGotOnce ? "받음" : "못 받음(기본값으로 동작)");
+#endif
         Serial.printf("[상태] 서버 연결 %s\n",
                       TALENT_HUB_ENABLE
                           ? (hubUp ? "붙어 있음" : (hubBegun ? "끊김(다시 붙는 중)" : "아직 안 켬"))
