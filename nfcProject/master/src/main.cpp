@@ -541,7 +541,7 @@ static bool     bootSyncDone = false; // 부팅 후 와이파이가 처음 붙�
 // 한 번에 옮긴다. 그 위에 글자만 gfx 로 직접 얹는다(글자 영역은 작아 깜빡임이 거의 없다).
 static uint16_t *frame = nullptr;
 static void blitFrame();
-// 캐릭터 그림을 챙기는 일은 SD·서버를 쓴다(저 아래 beginHttp 뒤에 있다) — 화면 쪽에서 먼저 부른다.
+// 캐릭터 그림을 챙기는 일은 SD·서버를 쓴다(저 아래 httpSend 뒤에 있다) — 화면 쪽에서 먼저 부른다.
 static bool loadMoodIcon(const char *name);
 
 // RGB565 두 색을 섞는다. a=0..255 는 앞 색(fg)의 비중.
@@ -1389,12 +1389,96 @@ static void listSD() {
   Serial.printf("[SD] 사진 %d 개\n", n);
 }
 
-// ── 서버에서 사진 받기 (길게 누르기) ────────────────────────────────
-// HTTPClient 를 열어 x-talent-key 를 실어 GET 한다. https 면 인증서 검사는 건너뛴다(setInsecure).
-static void beginHttp(HTTPClient &http, WiFiClientSecure &scli, WiFiClient &cli, const char *url) {
-  if (strncmp(TALENT_SERVER, "https", 5) == 0) { scli.setInsecure(); http.begin(scli, url); }
-  else                                         { http.begin(cli, url); }
-  http.addHeader("x-talent-key", TALENT_DEVICE_KEY);
+// ── 서버 ────────────────────────────────────────────────────────────
+// 연결 **하나를 맺어 계속 쓴다**(keep-alive). 전에는 요청마다 WiFiClientSecure 를
+// 부르는 함수의 스택에 두어, 함수가 끝나면 연결이 소멸하고 다음 요청이 또 처음부터
+// 맺었다. 그 고정비(DNS+TCP+TLS)를 시리얼로 재 보니 **본문 크기와 무관하게 늘 ~610ms**
+// 였다(설정 받기를 8초 간격으로 세 번: 612·612·610ms — 세 번이 2ms 안이라 서버가
+// 들쭉날쭉한 것이 아니라 고정비다. 같은 서버에 맥에서 curl 로 재면 67ms 다).
+// 태깅 한 번에 출석 지급 한 번이니 아이 앞에서 그 610ms 를 꼬박 기다렸다.
+// 치는 곳은 TALENT_SERVER 하나뿐이라 연결을 들고 있으면 핸드셰이크는 처음 한 번뿐이다.
+// (funfunFirmware 가 먼저 이렇게 고쳤다 — 그쪽 머리말에 그때 잰 값이 있다.)
+//
+// ★ 객체가 하나뿐이라 **겹쳐 쓸 수 없다** — 한 요청을 http.end() 로 끝맺은 뒤에 다음을
+//   부른다. 지금 서버를 부르는 자리는 모두 차례로 돈다(조회·지급·설정·이름표·사진).
+static const uint32_t HTTP_TIMEOUT_MS   = 6000;
+static const uint32_t HTTP_KEEPALIVE_MS = 30000;   // 이만큼 조용하면 한 번 찔러 살려 둔다
+static WiFiClientSecure httpsCli;
+static WiFiClient       httpPlainCli;
+static HTTPClient       http;
+static bool     httpInsecureSet = false;
+static uint32_t httpWarmAt      = 0;
+
+static bool talentSsl() { return strncmp(TALENT_SERVER, "https", 5) == 0; }
+
+// 들고 있던 연결을 정말 끊는다. setReuse(false) 라야 end() 가 소켓을 닫는다.
+static void httpDrop() {
+  http.setReuse(false);
+  http.end();
+  http.setReuse(true);
+  httpsCli.stop();
+  httpPlainCli.stop();
+}
+
+// 요청 하나를 보낸다. body 가 nullptr 이면 GET, 아니면 JSON POST(method 로 따로 적으면
+// 그것으로 보낸다). 돌려주는 값은 HTTP 코드이고 음수면 보내지 못한 것이다.
+// 본문·스트림은 부른 쪽에서 읽고 **부른 쪽이 http.end() 를 부른다** — 여기서 끝맺으면
+// 아직 읽지 않은 스트림이 닫혀 버린다(사진은 460KB 를 흘려 읽는다).
+//
+// retry: 들고 있는 연결을 서버가 조용히 닫는 일이 있다(keep-alive 시간이 지나면 끊는다).
+//   그러면 보내기는 되지만 답이 오지 않는다 — 그때 한 번만 새로 맺어 다시 물어본다.
+//   이 되살리기가 없으면 한참 조용했다가 태깅할 때 첫 요청이 늘 실패한다.
+//   ★ 다만 **또 보내면 안 되는 요청에는 쓰지 않는다**(출석 지급 POST). 서버가 받아서
+//     처리한 뒤에 답만 못 온 경우를 가릴 길이 없어, 다시 보내면 두 번 줄 수 있다.
+static int httpSend(const char *url, const char *body, const char *method, bool retry) {
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (talentSsl()) {
+      if (!httpInsecureSet) {  // 인증서 검사는 건너뛴다(기기 키로 가린다) — 한 번만 켜면 된다
+        httpsCli.setInsecure();
+        httpInsecureSet = true;
+      }
+      http.begin(httpsCli, url);
+    } else {
+      http.begin(httpPlainCli, url);
+    }
+    http.setReuse(true);  // ★ 이것이 end() 에서 소켓을 살려 두게 한다
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    // begin() 이 요청 헤더를 비우므로 헤더는 늘 여기서 다시 얹는다(겹쳐 쌓이지 않는다).
+    http.addHeader("x-talent-key", TALENT_DEVICE_KEY);
+    if (body) http.addHeader("Content-Type", "application/json");
+
+    const char *verb = method ? method : (body ? "POST" : "GET");
+    const int code = http.sendRequest(verb, (uint8_t *)body, body ? strlen(body) : 0);
+    if (code > 0) {
+      httpWarmAt = millis() + HTTP_KEEPALIVE_MS;  // 방금 썼으니 한동안 찌를 필요가 없다
+      return code;
+    }
+
+    http.end();
+    if (attempt == 0 && retry) {
+      Serial.printf("[서버] 들고 있던 연결이 닫혀 있었다(code=%d) — 새로 맺는다\n", code);
+      httpDrop();
+      continue;
+    }
+    return code;
+  }
+  return -1;
+}
+
+static int httpGet(const char *url) { return httpSend(url, nullptr, nullptr, true); }
+static int httpPost(const char *url, const char *body, bool retry) {
+  return httpSend(url, body, nullptr, retry);
+}
+
+// 연결을 살려 두려고 **본문 없는 HEAD** 를 한 번 보낸다. 답이 무엇이든 상관없다 —
+// 목적은 소켓을 깨워 두는 것뿐이다(실패하면 다음 요청이 새로 맺는다).
+static void httpWarm() {
+  httpWarmAt = millis() + HTTP_KEEPALIVE_MS;
+  if (WiFi.status() != WL_CONNECTED) return;
+  char url[192];
+  snprintf(url, sizeof(url), "%s/api/talent/config/v2?device=%s", TALENT_SERVER, TALENT_DEVICE_ID);
+  httpSend(url, nullptr, "HEAD", true);
+  http.end();
 }
 
 // ── '지금 기분' 의 캐릭터 그림 받기 ────────────────────────────────
@@ -1433,10 +1517,7 @@ static bool loadMoodIcon(const char *name) {
   char url[192];
   snprintf(url, sizeof(url), "%s/api/talent/photo/device/%s", TALENT_SERVER, name);
 
-  HTTPClient http; WiFiClientSecure scli; WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.setTimeout(6000);
-  const int code = http.GET();
+  const int code = httpGet(url);
   if (code != HTTP_CODE_OK) {
     http.end();
     Serial.printf("[기분] 캐릭터 %s 못 받음 code=%d\n", name, code);
@@ -1520,9 +1601,7 @@ static bool downloadPhoto(const char *img, const char *uid) {
   char url[192];
   snprintf(url, sizeof(url), "%s/api/talent/photo/device/%s", TALENT_SERVER, img);
 
-  HTTPClient http; WiFiClientSecure scli; WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  const int code = http.GET();
+  const int code = httpGet(url);
   if (code != HTTP_CODE_OK) { http.end(); Serial.printf("[동기화] %s 사진 실패 code=%d\n", uid, code); return false; }
 
   const size_t need = 480 * 480 * sizeof(uint16_t);
@@ -1621,9 +1700,7 @@ static void syncPhotos() {
   char url[160];
   snprintf(url, sizeof(url), "%s/api/talent/roster?px=%d", TALENT_SERVER, TALENT_PX);
 
-  HTTPClient http; WiFiClientSecure scli; WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  const int code = http.GET();
+  const int code = httpGet(url);
   if (code != HTTP_CODE_OK) {
     http.end();
     char m[40]; snprintf(m, sizeof(m), "이름표 실패 (%d)", code);
@@ -1694,10 +1771,7 @@ static void fetchConfig() {
   char url[192];
   snprintf(url, sizeof(url), "%s/api/talent/config/v2?device=%s", TALENT_SERVER, TALENT_DEVICE_ID);
 
-  HTTPClient http; WiFiClientSecure scli; WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.setTimeout(6000);
-  const int code = http.GET();
+  const int code = httpGet(url);
   if (code != HTTP_CODE_OK) { http.end(); Serial.printf("[설정] 받기 실패 code=%d\n", code); return; }
   String body = http.getString();
   http.end();
@@ -1754,11 +1828,8 @@ static bool lookupTalent(const char *uid, char *name, size_t nameCap, long *poin
   char url[192];
   snprintf(url, sizeof(url), "%s/api/talent/feed?uid=%s&limit=0", TALENT_SERVER, uid);
 
-  HTTPClient http; WiFiClientSecure scli; WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.setTimeout(6000);
   const uint32_t t0 = millis();
-  const int code = http.GET();
+  const int code = httpGet(url);
   if (code != HTTP_CODE_OK) { http.end(); Serial.printf("[서버] 조회 실패 code=%d\n", code); return false; }
   String body = http.getString();
   http.end();
@@ -1792,11 +1863,9 @@ static bool attendEarn(const char *uid, char *name, size_t nameCap, long *points
   snprintf(payload, sizeof(payload), "{\"uid\":\"%s\",\"card\":\"%s\",\"device\":\"%s\"}",
            uid, cfgAttendCard, TALENT_DEVICE_ID);
 
-  HTTPClient http; WiFiClientSecure scli; WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(6000);
-  const int code = http.POST((uint8_t *)payload, strlen(payload));
+  // retry=false — 서버가 받아 처리한 뒤 답만 못 온 경우를 가릴 길이 없어, 다시 보내면
+  // 포인트를 두 번 줄 수 있다. 연결이 닫혀 있었으면 이 한 번은 실패하고 조회로 넘어간다.
+  const int code = httpPost(url, payload, false);
   String body = http.getString();
   http.end();
   if (code != HTTP_CODE_OK) {
@@ -1838,11 +1907,9 @@ static void reportSeen(const char *uid) {
   char payload[128];
   snprintf(payload, sizeof(payload), "{\"uid\":\"%s\",\"device\":\"%s\"}", uid, TALENT_DEVICE_ID);
 
-  HTTPClient http; WiFiClientSecure scli; WiFiClient cli;
-  beginHttp(http, scli, cli, url);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(6000);
-  const int code = http.POST((uint8_t *)payload, strlen(payload));
+  // 되살려 보내도 덧나지 않는다 — 포인트가 오가지 않고, 관리 화면의 '미등록카드' 에
+  // 같은 UID 가 한 번 더 올라갈 뿐이다.
+  const int code = httpPost(url, payload, true);
   http.end();
   Serial.printf("[미등록] %s 알림 (code=%d)\n", uid, code);
 }
@@ -2516,6 +2583,10 @@ void loop() {
     cfgWanted = false;                   // 관리 화면이 민 것이든 주기든, 받는 길은 하나다
     fetchConfig();
   }
+
+  // 들고 있는 연결을 살려 둔다 — **대기 화면일 때만**. 태깅을 처리하는 중에 끼어들면
+  // 아이 앞에서 왕복이 하나 늘어난다. 조용한 사이에 미리 찔러 두는 것이 요지다.
+  if (online && mode == MODE_IDLE && (int32_t)(millis() - httpWarmAt) >= 0) httpWarm();
 
   // client 연결 상태 점 — client 가 붙거나 떨어져 색이 바뀔 때만 다시 그린다(화면 갱신 없이도)
   if (linkState() != shownLink) drawLinkDot();
