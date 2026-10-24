@@ -2199,14 +2199,26 @@ static int       wifiPick    = -1;      // 스캔에서 고른 순위(-1 = 아�
 static int       wifiRejects = 0;       // 이어서 거부된 횟수
 static int       wifiRadioResets = 0;   // 라디오를 껐다 켠 횟수(붙으면 0 으로)
 static volatile bool wifiStaBusy = false;   // begin() 뒤 결판을 기다린다(이벤트가 내린다)
+static volatile uint8_t wifiLastReason = 0; // 마지막으로 끊긴 까닭(0 = 아직 없다)
 
 // 붙어 보기의 결판이 여기로 온다. **와이파이 일꾼 위에서** 불리므로 깃발만 내린다.
 // 이것은 "걸어도 된다" 는 신호가 아니라 "이번 붙어 보기는 끝났다" 는 신호다 —
 // 15초를 다 기다리지 않고 다음 바퀴로 넘어가는 데만 쓴다(까닭은 위 머리말에).
-static void onWifiEvent(WiFiEvent_t ev) {
+//
+// ★ CONNECTED 는 **결판이 아니다**(2026-10-24). 공유기와 연결은 맺었지만 아직 주소를
+//   못 받은 자리다 — 코어는 그때 상태를 WL_IDLE_STATUS 로만 놓고 WL_CONNECTED 는
+//   GOT_IP 에서야 세운다(STA.cpp). 그런데 여기서 깃발을 내렸더니 WP_CONNECT 가 DHCP 가
+//   끝나기도 전에 "못 붙었다" 로 접고, 멀쩡히 붙고 있던 것을 disconnect() 로 끊어
+//   버렸다. 연결이 맺어지는 자리일수록 꼬박꼬박 걸렸다. 결판은 DISCONNECTED·STOP 둘뿐이다.
+//
+// 끊긴 까닭(reason)도 받아 둔다 — AUTH_FAIL(비밀번호) 과 NO_AP_FOUND(채널·5GHz) 과
+// HANDSHAKE_TIMEOUT(멀다) 은 손볼 자리가 저마다 달라, 그냥 "못 붙었다" 로는 모른다.
+static void onWifiEvent(WiFiEvent_t ev, WiFiEventInfo_t info) {
   switch (ev) {
-    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      wifiLastReason = info.wifi_sta_disconnected.reason;
+      wifiStaBusy = false;
+      break;
     case ARDUINO_EVENT_WIFI_STA_STOP:
       wifiStaBusy = false;
       break;
@@ -2304,17 +2316,25 @@ static void wifiService() {
         wifiPhaseAt = millis();
         return;
       }
-      wifiRejects = 0;
-      wifiStaBusy = true;
-      wifiPhase   = WP_CONNECT;
+      wifiRejects    = 0;
+      wifiLastReason = 0;            // 이번 붙어 보기의 까닭만 본다
+      wifiStaBusy    = true;
+      wifiPhase      = WP_CONNECT;
       wifiPhaseAt = millis();
       return;
 
     case WP_CONNECT:
       // 결판이 났거나(붙지 못함) 오래 걸리면 접는다. 붙었으면 맨 위에서 걸러진다.
       if (wifiStaBusy && millis() - wifiPhaseAt < WIFI_TRY_MS) return;
-      Serial.printf("[와이파이] %d순위 '%s' 에 못 붙었다\n",
-                    wifiPick + 1, WIFI_APS[wifiPick].ssid);
+      if (wifiLastReason)
+        Serial.printf("[와이파이] %d순위 '%s' 에 못 붙었다 — %s (%u)\n",
+                      wifiPick + 1, WIFI_APS[wifiPick].ssid,
+                      WiFi.disconnectReasonName((wifi_err_reason_t)wifiLastReason),
+                      (unsigned)wifiLastReason);
+      else
+        Serial.printf("[와이파이] %d순위 '%s' 에 못 붙었다 — %lu초를 기다렸는데 아무 말이 없다\n",
+                      wifiPick + 1, WIFI_APS[wifiPick].ssid,
+                      (unsigned long)(WIFI_TRY_MS / 1000));
       WiFi.disconnect();
       wifiRest();
       return;
@@ -2434,7 +2454,7 @@ void setup() {
   // 공유기를 못 찾아 네 곳을 번갈아 걸 때마다 쓰기가 나므로 그때 자주 밀린다.
   // 설정은 어차피 config.h 에 있어 저장할 이유가 없다.
   WiFi.persistent(false);
-  // 붙어 보기의 결판(CONNECTED/DISCONNECTED)을 여기서 받는다 — wifiService 는
+  // 붙어 보기의 결판(DISCONNECTED/STOP)과 끊긴 까닭을 여기서 받는다 — wifiService 는
   // 그 신호가 온 뒤에만 다음 begin() 을 건다(까닭은 wifiService 머리말에).
   WiFi.onEvent(onWifiEvent);
   WiFi.mode(WIFI_STA);
