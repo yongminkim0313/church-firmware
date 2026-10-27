@@ -39,6 +39,11 @@ cp secrets/ChurchSecrets.example.h secrets/ChurchSecrets.h
 기기마다 다른 값(`TALENT_DEVICE_ID`·`MDNS_HOSTNAME`·핀·화면 크기)은 각 프로젝트의
 `src/config.h` 에 그대로 있다 — 그쪽은 비밀이 아니다.
 
+**`nfcProject/master` 는 와이파이를 현장에서 폰으로도 넣을 수 있다**(2026-10-26) — 화면에
+뜬 QR 을 찍어 설정 창에서 고르면 플래시(NVS)에 적힌다. 여기 네 벌은 그대로 남아 뒤 순위로
+쓰이니, 새 교회에 가져갈 때마다 이 파일을 고쳐 다시 구울 일은 없다.
+자세한 것은 `nfcProject/master/src/README.md` 의 '와이파이를 폰으로 바꾸기'.
+
 ## 굽기
 
 ```bash

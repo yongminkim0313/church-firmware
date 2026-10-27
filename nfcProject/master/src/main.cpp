@@ -2,7 +2,7 @@
 //
 // 보드: LILYGO T-RGB 2.1" 원형 (ESP32-S3 · ST7701S RGB 480×480 · CST820 터치)
 // 이 보드는 화면만 담당한다 —
-//   1) config.h 의 와이파이에 붙는다
+//   1) 아는 와이파이에 붙는다 (폰으로 넣은 것이 앞, ChurchSecrets.h 의 네 벌이 뒤 — creds.h)
 //   2) nfc-display.local 로 자기 이름을 알린다(mDNS)/Users/kimyongmin/workspace/arduino/nfcProject/config.h
 //   3) 포트 81 에 WebSocket 서버를 연다
 //   4) 외부(NFC 시스템)가 붙어 명령을 보내면 그에 맞춰 화면을 바꾼다
@@ -102,8 +102,18 @@
 //   ※ LilyGo-T-RGB 라이브러리(LV_Helper.h·LilyGo_RGBPanel.h)는 넣지 말 것 — lvgl/SensorLib
 //     버전 충돌로 빌드가 깨진다. 이 스케치는 Arduino_GFX 로 직접 그린다(v1.0 과 같은 이유).
 //
+// ── 와이파이를 폰으로 바꾸기 (설정 모드, 2026-10-26) ─────────────────
+//   새 교회로 기기를 가져갔을 때 노트북 없이 와이파이를 바꿀 수 있다. **앱은 없다** —
+//   이 보드가 스스로 와이파이(SoftAP)를 띄우고, 화면에 뜬 QR 을 폰 카메라로 찍으면
+//   그 AP 에 붙어 설정 창이 저절로 뜬다(캡티브 포털). 거기서 교회 와이파이를 고르고
+//   비밀번호를 넣으면, 보드가 그 자리에서 붙어 보고 **맞을 때만** 플래시(NVS)에 적는다.
+//   들어가는 길 세 가지: 켤 때 화면 누르고 있기 · 아는 곳이 안 보일 때 저절로 · 시리얼 'w'.
+//   자세한 것은 portal.h(설정 모드)와 creds.h(목록 규칙) 머리말에.
+//
 // ── 시리얼 명령 (115200) ────────────────────────────────────────────
 //   n 다음 사진 · p 이전 사진 · h 활성 화면으로 · s 사진 목록 · l SD 파일 목록 · r 재부팅 · ? 도움말
+//   w 와이파이 설정 모드로 들어가기(설정 모드에서 'w' 를 또 치면 걷는다)
+//   W 폰으로 넣은 와이파이를 모두 잊기(구울 때 넣은 네 벌은 남는다 — 다시 세우면 반영)
 //   t 시험 NFC 화면(카드·서버 없이 이름·포인트·기분을 띄워 글자를 본다 — 누를 때마다 다음 보기)
 //   g 불러오는 중 고리를 3초 돌려 본다(서버 없이 확인용)
 //
@@ -124,6 +134,7 @@
 #include <U8g2lib.h>             // 한글 u8g2 폰트(굴림·quan7)·UTF8 출력을 켜고, 굴림 폰트도 여기서 온다
 #include <Arduino_GFX_Library.h>
 #include "config.h"              // WIFI_SSID · WIFI_PASSWORD · MDNS_HOSTNAME · WS_PORT
+#include "creds.h"               // 아는 와이파이 목록(구울 때 넣은 네 벌 + 폰으로 넣은 네 벌)
 #include "useEnable.h"           // USEENABLE[480×480]  — 사용 활성(대기 화면의 첫 장)
 #include "connected.h"
 #include <esp_now.h>
@@ -2213,18 +2224,11 @@ static void espnowService() {
 static void espnowService() {}
 #endif
 
-// ── 와이파이 (우선순위 4개, config.h) ───────────────────────────────
-// 0→1→2→3 순서로 붙어 본다. 한 곳에 WIFI_TRY_MS 만큼 붙어 보고 안 되면 다음 순위로,
-// 넷 다 안 되면 처음(0순위)으로 돌아가 계속 반복한다(루프). WiFi.begin() 은 기다리지 않고
+// ── 와이파이 (아는 곳 여러 곳, creds.h) ────────────────────────────
+// 목록(wifiAps)은 creds.h 가 짠다 — 폰으로 적어 넣은 것이 앞, 구울 때 넣은 네 벌이 뒤다.
+// 앞선 순위부터 붙어 본다. 한 곳에 WIFI_TRY_MS 만큼 붙어 보고 안 되면 다음 순위로,
+// 다 안 되면 처음으로 돌아가 계속 반복한다(루프). WiFi.begin() 은 기다리지 않고
 // 바로 돌아오므로 붙는 동안에도 loop 가 멈추지 않는다 — 터치로 그림이 바뀌어야 하기 때문이다.
-struct WifiAp { const char *ssid; const char *pass; };
-static const WifiAp WIFI_APS[] = {
-  { WIFI_SSID_0, WIFI_PASS_0 },
-  { WIFI_SSID_1, WIFI_PASS_1 },
-  { WIFI_SSID_2, WIFI_PASS_2 },
-  { WIFI_SSID_3, WIFI_PASS_3 },
-};
-static const int WIFI_AP_COUNT = sizeof(WIFI_APS) / sizeof(WIFI_APS[0]);
 
 // ── 둘러보고 나서 건다 (2026-10-18) ───────────────────────────────
 // 처음에는 목록의 네 곳을 차례로 begin() 해 봤다. 그런데 **없는 AP 에 걸어 보는
@@ -2265,6 +2269,18 @@ static uint32_t  wifiRestMs  = WIFI_REST_MIN_MS;
 static int       wifiPick    = -1;      // 스캔에서 고른 순위(-1 = 아직 없음)
 static int       wifiRejects = 0;       // 이어서 거부된 횟수
 static int       wifiRadioResets = 0;   // 라디오를 껐다 켠 횟수(붙으면 0 으로)
+static bool      wifiEverOnline  = false;  // 부팅한 뒤 한 번이라도 붙어 봤나(설정 모드 자동 진입 조건)
+static int       wifiNoApRounds  = 0;      // 둘러봐도 아는 이름이 없던 바퀴 수(붙으면 0 으로)
+
+// ── 이어서 실패한 곳은 건너뛴다 (2026-10-26) ───────────────────────
+// 고르는 규칙은 '보이는 것 중 가장 앞선 순위' 하나다. 그런데 그 한 곳의 비밀번호가
+// 틀리면(공유기에서 비밀번호를 바꿨다거나) 그곳이 계속 뽑혀, 아래 순위에 멀쩡히 맞는
+// 것이 있어도 영영 가 보지 못한다 — 폰으로 적어 넣은 것이 늘 1순위라 더 잘 생긴다.
+// 그래서 이어서 WIFI_BAD_MAX 번 실패한 자리는 잠깐 건너뛴다. 보이는 곳이 모두
+// 건너뛸 자리가 되면 셈을 모두 지우고 처음부터 다시 돈다(영영 포기하지는 않는다 —
+// 공유기가 돌아오는 중일 수도 있다).
+static const int WIFI_BAD_MAX = 3;
+static uint8_t   wifiBad[sizeof(wifiAps) / sizeof(wifiAps[0])] = { 0 };
 static volatile bool wifiStaBusy = false;   // begin() 뒤 결판을 기다린다(이벤트가 내린다)
 static volatile uint8_t wifiLastReason = 0; // 마지막으로 끊긴 까닭(0 = 아직 없다)
 
@@ -2322,11 +2338,21 @@ static void wifiRadioReset() {
   wifiRest();
 }
 
+// ── 설정 모드 ──────────────────────────────────────────────────────
+// 여기에 끼운 까닭: 설정 모드는 **위에 있는 것들을 그대로 쓴다** — 화면 그리는 손
+// (drawStatus·drawCenteredUTF8·blitFrame·drawIdle), 끊긴 까닭(wifiLastReason·wifiStaBusy),
+// 그리고 creds.h 의 목록이다. 그래서 그것들이 다 정해진 뒤, wifiService 바로 앞에 온다
+// (아래 loop 가 둘 중 하나만 돌린다 — 둘이 함께 돌면 라디오를 다툰다).
+#include "portal.h"
+
 static void wifiService() {
   if (WiFi.status() == WL_CONNECTED) {      // 붙었다 — 셈을 모두 처음으로
     wifiStaBusy     = false;
     wifiRejects     = 0;
     wifiRadioResets = 0;
+    wifiNoApRounds  = 0;
+    wifiEverOnline  = true;
+    if (wifiPick >= 0) wifiBad[wifiPick] = 0;
     wifiRestMs      = WIFI_REST_MIN_MS;
     wifiPhase       = WP_REST;
     wifiPhaseAt     = millis();
@@ -2352,21 +2378,39 @@ static void wifiService() {
       }
       if (n < 0) { WiFi.scanDelete(); wifiRest(); return; }
 
-      // 눈에 보이는 것 중에서 목록에서 가장 앞선(= 순위가 높은) 것을 고른다
-      wifiPick = -1;
-      for (int i = 0; i < WIFI_AP_COUNT && wifiPick < 0; i++)
-        for (int16_t j = 0; j < n; j++)
-          if (!strcmp(WiFi.SSID(j).c_str(), WIFI_APS[i].ssid)) { wifiPick = i; break; }
+      // 눈에 보이는 것 중에서 목록에서 가장 앞선(= 순위가 높은) 것을 고른다.
+      // 이어서 여러 번 실패한 자리는 건너뛴다(머리말의 wifiBad). 보이기는 하는데
+      // 모두 건너뛸 자리면 셈을 지우고 한 번 더 돈다.
+      bool sawKnown = false;
+      for (int pass = 0; pass < 2 && !sawKnown; pass++) {
+        wifiPick = -1;
+        for (int i = 0; i < wifiApCount; i++) {
+          bool visible = false;
+          for (int16_t j = 0; j < n; j++)
+            if (!strcmp(WiFi.SSID(j).c_str(), wifiAps[i].ssid)) { visible = true; break; }
+          if (!visible) continue;
+          sawKnown = true;
+          if (wifiBad[i] >= WIFI_BAD_MAX) continue;      // 여기는 잠깐 건너뛴다
+          wifiPick = i;
+          break;
+        }
+        if (sawKnown && wifiPick < 0) {                  // 보이는 곳이 모두 건너뛸 자리였다
+          Serial.println("[와이파이] 아는 곳이 다 말썽이었다 — 셈을 지우고 다시 돈다");
+          memset(wifiBad, 0, sizeof(wifiBad));
+          sawKnown = false;                              // 한 바퀴 더 돌려 다시 고른다
+        }
+      }
 
       if (wifiPick < 0) {
-        Serial.printf("[와이파이] %d곳이 보이는데 아는 곳은 없다 — %lu초 뒤에 다시 둘러본다\n",
-                      (int)n, (unsigned long)(wifiRestMs / 1000));
+        wifiNoApRounds++;
+        Serial.printf("[와이파이] %d곳이 보이는데 아는 곳은 없다 — %lu초 뒤에 다시 둘러본다 (%d바퀴)\n",
+                      (int)n, (unsigned long)(wifiRestMs / 1000), wifiNoApRounds);
         WiFi.scanDelete();
         wifiRest();
         return;
       }
       Serial.printf("[와이파이] %d순위 '%s' 이 보인다 — 붙어 본다\n",
-                    wifiPick + 1, WIFI_APS[wifiPick].ssid);
+                    wifiPick + 1, wifiAps[wifiPick].ssid);
       WiFi.scanDelete();
       WiFi.disconnect();                          // connecting 을 비우고 틈을 둔다
       wifiPhase   = WP_SETTLE;
@@ -2376,7 +2420,7 @@ static void wifiService() {
 
     case WP_SETTLE:
       if (millis() - wifiPhaseAt < WIFI_SETTLE_MS) return;
-      if (WiFi.begin(WIFI_APS[wifiPick].ssid, WIFI_APS[wifiPick].pass) == WL_CONNECT_FAILED) {
+      if (WiFi.begin(wifiAps[wifiPick].ssid, wifiAps[wifiPick].pass) == WL_CONNECT_FAILED) {
         // 아직 connecting 에서 안 빠졌다 — 틈을 더 두고 다시. 거부가 거듭되면 라디오를 껐다 켠다.
         if (++wifiRejects >= WIFI_REJECT_MAX) { wifiRadioReset(); return; }
         WiFi.disconnect();
@@ -2395,13 +2439,14 @@ static void wifiService() {
       if (wifiStaBusy && millis() - wifiPhaseAt < WIFI_TRY_MS) return;
       if (wifiLastReason)
         Serial.printf("[와이파이] %d순위 '%s' 에 못 붙었다 — %s (%u)\n",
-                      wifiPick + 1, WIFI_APS[wifiPick].ssid,
+                      wifiPick + 1, wifiAps[wifiPick].ssid,
                       WiFi.disconnectReasonName((wifi_err_reason_t)wifiLastReason),
                       (unsigned)wifiLastReason);
       else
         Serial.printf("[와이파이] %d순위 '%s' 에 못 붙었다 — %lu초를 기다렸는데 아무 말이 없다\n",
-                      wifiPick + 1, WIFI_APS[wifiPick].ssid,
+                      wifiPick + 1, wifiAps[wifiPick].ssid,
                       (unsigned long)(WIFI_TRY_MS / 1000));
+      if (wifiPick >= 0 && wifiBad[wifiPick] < 255) wifiBad[wifiPick]++;
       WiFi.disconnect();
       wifiRest();
       return;
@@ -2459,6 +2504,24 @@ static bool touching() {
   return fingers == 1;
 }
 
+// 켤 때 화면을 누른 채로 두고 있나 — 설정 모드로 들어가는 길이다(config.h 의 PORTAL_BOOT_HOLD_MS).
+// 평소 터치(짧게 = 다음 사진, 길게 = 사진 동기화)와 겹치지 않게 부팅 때로 뺀 것이다.
+// **끝까지 누르고 있어야** 한다 — 켤 때 손이 스친 것으로 설정 모드에 들어가지 않게.
+static bool portalBootHold() {
+#if PORTAL_ENABLE
+  if (!PORTAL_BOOT_HOLD_MS || !touching()) return false;
+  drawStatus("그대로 누르고 계세요");
+  const uint32_t until = millis() + PORTAL_BOOT_HOLD_MS;
+  while (millis() < until) {
+    if (!touching()) { Serial.println("[설정] 손을 뗐다 — 평소대로 켠다"); drawIdle(); return false; }
+    delay(20);
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
 void setup() {
   Serial.begin(115200);
 #if ARDUINO_USB_CDC_ON_BOOT
@@ -2514,6 +2577,8 @@ void setup() {
 
   touchBegin();                  // 화면을 켠 뒤에 — 확장칩(bus)이 begin() 에서 준비된다
 
+  credsLoad();                   // 아는 와이파이 목록 — 폰으로 넣은 것(NVS)이 앞, 구울 때 넣은 것이 뒤
+
   // 와이파이 설정을 플래시(NVS)에 저장하지 않는다 — **화면 밀림의 주범**이다.
   // WiFi.begin() 은 기본값으로 SSID·비밀번호를 NVS 에 적는데, 플래시에 쓰는 동안에는
   // 캐시가 잠깐 꺼진다. 이 칩의 RGB 패널 갱신 인터럽트는 IRAM 에 없어서(코어 기본 설정)
@@ -2527,10 +2592,31 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);          // 서버라 잠들지 않게 — 명령을 놓치지 않는다
   espnowBegin();                 // 라디오가 올라온 뒤에. 공유기에 붙기 전에도 리더와는 말이 된다
-  wifiService();                 // 붙어 보기 시작(기다리지 않는다)
+
+  // 켤 때 화면을 누르고 있으면 설정 모드로 — 폰으로 와이파이를 적어 넣는 길이다(portal.h).
+  if (portalBootHold()) portalStart("켤 때 화면을 누르고 있었다");
+  else                  wifiService();     // 붙어 보기 시작(기다리지 않는다)
 }
 
 void loop() {
+  // ── 설정 모드일 때 ─────────────────────────────────────────────
+  // 그동안에는 와이파이·태깅 일을 모두 쉰다 — 라디오를 저쪽(AP·DNS·웹)이 쓰고,
+  // 공유기에 붙어 있지 않아 서버에 물을 수도 없다. 둘을 함께 돌리면 wifiService 가
+  // 채널을 옮기고 끊어 버려 폰이 설정 창을 쓰는 중에 떨어진다.
+  // 시리얼 명령은 세 글자만 받는다 — 뜻은 평소와 같다(아래 switch 와 짝을 맞춘 것이다):
+  // 'r' 다시 세우기 · 'w' 설정 모드 걷기 · 'W' 폰으로 넣은 와이파이 지우기.
+  if (portalActive()) {
+    portalService();
+    while (Serial.available()) {
+      const int c = Serial.read();
+      if (c == 'r' || c == 'R') { Serial.println("[명령] 재부팅합니다..."); Serial.flush(); ESP.restart(); }
+      else if (c == 'w')        portalStop();
+      else if (c == 'W')        credsClear();
+    }
+    delay(5);
+    return;
+  }
+
   linkService();                 // 선으로 온 명령 먼저 — 공유기를 안 거쳐 가장 빠르다
   espnowService();               // 선이 없을 때 리더가 라디오로 보낸 것
 
@@ -2566,6 +2652,16 @@ void loop() {
     if (mode == MODE_IDLE) drawIdle();   // 대기 화면일 때만 아이콘을 갱신(NFC 화면은 건드리지 않는다)
     sendState();
   }
+
+  // 아는 와이파이가 아예 안 보이면 설정 모드로 — 새 교회에 가져다 켠 자리다.
+  // **한 번이라도 붙었던 뒤에는 들어가지 않는다**: 공유기를 잠깐 껐을 때 기기가
+  // 설정 모드로 달아나면 안 된다(돌아오면 wifiService 가 혼자 다시 붙는다).
+#if PORTAL_ENABLE
+  if (PORTAL_AUTO_ROUNDS && !wifiEverOnline && wifiNoApRounds >= PORTAL_AUTO_ROUNDS) {
+    portalStart("아는 와이파이가 보이지 않는다");
+    return;
+  }
+#endif
 
   if (serversUp) webSocket.loop();   // WebSocket 을 굴린다(받은 것을 처리)
   if (hubBegun) hub.loop();          // 서버와의 연결도 함께(다시 붙기·heartbeat 가 여기서 돈다)
@@ -2630,8 +2726,10 @@ void loop() {
         Serial.println("[명령] 불러오는 중 고리 3초");
         spinStart(); delay(3000); spinStop();      // delay 는 쉬는 것이라 그동안 일꾼이 돈다
         break;
+      case 'w':           portalStart("시리얼 명령"); return;      // 설정 모드 — 이 바퀴는 여기서 접는다
+      case 'W':           credsClear(); Serial.println("[명령] 다시 세우면 반영됩니다"); break;
       case 'r': case 'R': Serial.println("[명령] 재부팅합니다..."); Serial.flush(); ESP.restart(); break;
-      case '?':           Serial.println("[명령] n 다음 · p 이전 · h 활성 · s 사진 목록 · l SD 목록 · c 설정 받기 · i 상태 · t 시험 화면 · v 리더 소리 · g 고리 · r 재부팅"); break;
+      case '?':           Serial.println("[명령] n 다음 · p 이전 · h 활성 · s 사진 목록 · l SD 목록 · c 설정 받기 · i 상태 · t 시험 화면 · v 리더 소리 · g 고리 · w 와이파이 설정 모드 · W 폰으로 넣은 와이파이 지우기 · r 재부팅"); break;
       default: break;
     }
   }
