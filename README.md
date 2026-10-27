@@ -1,8 +1,10 @@
 # church-firmware — 펀펀포인트 현장 기기 펌웨어
 
-교회 현장에 서 있는 NFC 키링 리더·디스플레이의 ESP32 펌웨어다. 전부 PlatformIO 프로젝트이고,
-서버는 [funfunServer](https://github.com/yongminkim0313/church-funfunserver)
+교회 현장에 서 있는 ESP32 기기들의 펌웨어다. 전부 PlatformIO 프로젝트다.
+대부분은 NFC 키링 리더·디스플레이이고, 서버는
+[funfunServer](https://github.com/yongminkim0313/church-funfunserver)
 (`https://funfun.youthvision.co.kr`)를 본다.
+**`jdSnapRemote` 만 다르다** — 꾸미포토 네 컷 부스의 리모컨이라 서버도 와이파이도 쓰지 않는다.
 
 아두이노 IDE 로 쓰던 옛 판(`.ino`)은 [church-arduino](https://github.com/yongminkim0313/church-arduino)
 의 `nfcProject/`·`nfcProjectClient/` 에 그대로 있다 — **여기 있는 것이 현장에 올라가는 쪽**이다.
@@ -15,9 +17,10 @@
 | `nfcProject/slave` | ESP32-C3 SuperMini + PN532(SPI) + 부저 + DFPlayer Mini(UART) | **리더만** 맡는다. 화면이 없고, 읽은 UID 를 넘긴 뒤 결과를 **부저와 한국어 말**로 알린다 |
 | `nfcProject/single` | LILYGO T-RGB 2.1" 원형 + PN532(I2C) + 스피커 | **master + slave 를 한 보드로 합친 것.** 읽고·묻고·그리고·소리까지 혼자 한다 |
 | `funfunFirmware` | ESP32-S3-N16R8 + GC9A01 240×240 원형(SPI) + PN532(SPI) + DFPlayer Mini(UART) | `master` 를 **사진 없이 글자만**으로 옮긴 판. microSD 도 터치도 없다(BOOT 버튼으로 대신) |
+| `jdSnapRemote` | ESP32-C3 SuperMini + 단추(+LED·부저) | **꾸미포토(jdSnap) 네 컷 부스의 리모컨.** 단추를 누르면 아이패드·태블릿의 부스 앱이 촬영을 시작한다. NFC 도 서버도 와이파이도 없다 |
 
 세 판(`master`·`single`·`funfunFirmware`)이 서버와 직접 말한다 — 조회·지급, 설정 받기,
-그리고 `/ws/device` 로 붙어 변화를 받는다. `slave` 는 서버를 모른다.
+그리고 `/ws/device` 로 붙어 변화를 받는다. `slave` 와 `jdSnapRemote` 는 서버를 모른다.
 
 ## 받아 간 뒤 한 번 — 인증정보
 
@@ -28,6 +31,9 @@
 cp secrets/ChurchSecrets.example.h secrets/ChurchSecrets.h
 # 그다음 secrets/ChurchSecrets.h 를 열어 제 망·제 교회의 값으로 채운다
 ```
+
+**`jdSnapRemote` 는 해당 없다** — 와이파이도 서버도 기기 키도 쓰지 않아 이 파일을 보지
+않는다. 받아 간 뒤 따로 채울 것 없이 그냥 구우면 된다.
 
 안 하면 빌드가 `fatal error: ChurchSecrets.h: No such file or directory` 로 그 자리에서
 멈춘다 — 조용히 빈 값으로 구워져 현장에서 "왜 안 붙지" 가 되지 않게 한 것이다.
@@ -47,7 +53,8 @@ cp secrets/ChurchSecrets.example.h secrets/ChurchSecrets.h
 ## 굽기
 
 ```bash
-cd nfcProject/master    # 또는 single · slave  (funfunFirmware 는 저장소 바로 아래다)
+cd nfcProject/master    # 또는 single · slave
+                        # (funfunFirmware · jdSnapRemote 는 저장소 바로 아래다)
 pio run                 # 빌드만
 pio run -t upload       # 구워 넣기
 pio device monitor      # 115200
@@ -107,6 +114,43 @@ cp -R voices/01 voices/02 voices/03 /Volumes/<SD>/   # FAT32 microSD 뿌리에
 화면 문구와 토막은 **글자로 맞물려 있다**: `nfcProject` 에서 화면에 띄우는 한 줄을 고치면
 `slave/src/sound.cpp` 의 `NOTE_CLIPS` 표도 함께 고칠 것 — 어긋나면 그 문구만 조용해진다
 (틀리게 읽지는 않는다. 리더 시리얼에 "읽을 토막이 없다" 가 찍힌다).
+
+## 꾸미포토 부스 리모컨 — jdSnapRemote (2026-10-26)
+
+네 컷 부스 앞에 둔 단추다. 기기를 만지러 다가가지 않고 촬영을 시작하려는 것이다.
+**두 길 가운데 하나로 붙고, 보드에서 고른다**(한 벌을 구워 두고 다시 굽지 않는다):
+
+| | GATT (권함) | HID (블루투스 키보드) |
+|--|--|--|
+| 페어링 | **없다** — 앱이 서비스 UUID 로 찾아 바로 붙는다 | 기기 설정에서 **한 번 페어링해야 한다** |
+| 돌려받기 | 된다 — 앱이 지금 화면을 써 주어 LED·부저가 **카운트다운을 같이 센다** | **안 된다**(키보드에는 돌려줄 길이 없다) |
+| 보내는 것 | `[seq, button]` 두 바이트 | 스페이스(셔터) · ESC(처음으로) |
+
+- 길 바꾸기: **단추를 쥔 채로 보드를 켜고 3초** 더 쥐고 있는다(또는 시리얼에 `m`).
+  NVS 에 남아 다음에 켜도 그대로다.
+- 단추가 **하나면** 짧게 = 셔터, 길게(0.7초) = 처음으로. 두 번째 단추를 달면
+  (`PIN_BUTTON_BACK`) 둘 다 누르는 순간 바로 나간다.
+- **배선도: `jdSnapRemote/docs/wiring.svg`** (브라우저나 미리보기로 열면 된다).
+- ⚠ **GPIO2·8·9 에 단추를 달지 말 것** — 부팅 스트래핑 핀이라 켜는 순간 눌려 있으면
+  보드가 다운로드 모드로 들어간다. 기본값은 GPIO3 이다.
+- 단추를 달기 전에도 **시리얼로 앱을 시험해 볼 수 있다** — `b`(셔터) · `n`(처음으로) · `s`(형편).
+- 깊은 잠은 **일부러 쓰지 않는다**. 깨어나 다시 붙는 데 1~2초가 걸려 첫 누름이 먹히지
+  않는데, 줄 선 부스에서 그게 제일 나쁘다. 붙어 있는 동안 ~15mA 다.
+- ⚠ **알리는 순서가 중요하다** — 알림 한 덩이는 31바이트뿐인데 128비트 서비스 UUID
+  하나가 18바이트를 먹는다. 이름을 같은 덩이에 먼저 넣으면 **UUID 가 조용히 스캔 응답으로
+  밀려나** 앱의 걸러 찾기가 리모컨을 못 본다. 그래서 `enableScanResponse(true)` → `setName`
+  → `addServiceUUID` 순서로 둔다(NimBLE 은 스캔 응답이 켜져 있으면 이름을 그쪽에 넣는다).
+- 와이파이를 쓰지 않는 까닭은 `src/main.cpp` 머리말에 있다(요약: 아이패드는 AirPrint
+  프린터와 같은 와이파이에 있어야 하고, 현장 공유기는 기기끼리의 통신을 막는 일이 흔하다).
+
+**앱 쪽 짝이 셋이다** — 프로토콜을 고치려면 넷을 함께 고쳐야 한다:
+
+| 자리 | 무엇 |
+|---|---|
+| `src/main.cpp` 의 `SERVICE_UUID`·`BUTTON_UUID`·`STATE_UUID` | 펌웨어가 알리는 차림 |
+| `jdSnap/JdSnap/Services/BoothRemote.swift` | 아이패드 쪽 |
+| `jdSnap/android/…/service/BoothRemote.kt` | 태블릿 쪽 |
+| `jdSnap/CLAUDE.md` 의 '부스 리모컨' 절 | 세 곳이 맞춘 규약을 적어 둔 곳 |
 
 ## 서버와 맞물린 자리
 
