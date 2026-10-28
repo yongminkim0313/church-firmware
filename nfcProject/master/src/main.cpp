@@ -884,7 +884,11 @@ static void drawStatus(const char *msg) {
 
 static volatile bool spinWant = false;   // 돌려 달라(서버와 이야기하는 동안)
 static volatile bool spinBusy = false;   // 지금 화면에 조각이 올라가 있다
-static volatile int  spinDepth = 0;      // 겹쳐 부른 횟수(사진 동기화 안에서 또 부른다)
+// 겹쳐 부른 횟수(사진 동기화 안에서 또 부른다). **이것만 volatile 이 아니다** —
+// 위 셋과 달리 고리 task 는 이 값을 보지 않는다. spinStart/spinStop(= Spinner) 만
+// 건드리고, 그 여섯 자리는 모두 loop 쪽에서 불린다. 붙여 봐야 C++20 에서 ++/-- 가
+// deprecated 라 경고만 뜨고, volatile 은 atomic 이 아니라 task 사이에서도 안전하지 않다.
+static int spinDepth = 0;
 static volatile bool spinPause = false;  // 화면을 통째로 옮기는 중 — 잠깐 비켜 있어라
 static int spinAt = 0;                   // 지금 조각이 놓인 각도
 
