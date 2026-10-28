@@ -107,7 +107,8 @@
 //   이 보드가 스스로 와이파이(SoftAP)를 띄우고, 화면에 뜬 QR 을 폰 카메라로 찍으면
 //   그 AP 에 붙어 설정 창이 저절로 뜬다(캡티브 포털). 거기서 교회 와이파이를 고르고
 //   비밀번호를 넣으면, 보드가 그 자리에서 붙어 보고 **맞을 때만** 플래시(NVS)에 적는다.
-//   들어가는 길 세 가지: 켤 때 화면 누르고 있기 · 아는 곳이 안 보일 때 저절로 · 시리얼 'w'.
+//   들어가는 길 세 가지: 켤 때 10초 안에 화면 1초 누르기 · 아는 곳이 안 보일 때
+//   저절로 · 시리얼 'w'.
 //   자세한 것은 portal.h(설정 모드)와 creds.h(목록 규칙) 머리말에.
 //
 // ── 시리얼 명령 (115200) ────────────────────────────────────────────
@@ -2508,24 +2509,6 @@ static bool touching() {
   return fingers == 1;
 }
 
-// 켤 때 화면을 누른 채로 두고 있나 — 설정 모드로 들어가는 길이다(config.h 의 PORTAL_BOOT_HOLD_MS).
-// 평소 터치(짧게 = 다음 사진, 길게 = 사진 동기화)와 겹치지 않게 부팅 때로 뺀 것이다.
-// **끝까지 누르고 있어야** 한다 — 켤 때 손이 스친 것으로 설정 모드에 들어가지 않게.
-static bool portalBootHold() {
-#if PORTAL_ENABLE
-  if (!PORTAL_BOOT_HOLD_MS || !touching()) return false;
-  drawStatus("그대로 누르고 계세요");
-  const uint32_t until = millis() + PORTAL_BOOT_HOLD_MS;
-  while (millis() < until) {
-    if (!touching()) { Serial.println("[설정] 손을 뗐다 — 평소대로 켠다"); drawIdle(); return false; }
-    delay(20);
-  }
-  return true;
-#else
-  return false;
-#endif
-}
-
 void setup() {
   Serial.begin(115200);
 #if ARDUINO_USB_CDC_ON_BOOT
@@ -2597,9 +2580,15 @@ void setup() {
   WiFi.setSleep(false);          // 서버라 잠들지 않게 — 명령을 놓치지 않는다
   espnowBegin();                 // 라디오가 올라온 뒤에. 공유기에 붙기 전에도 리더와는 말이 된다
 
-  // 켤 때 화면을 누르고 있으면 설정 모드로 — 폰으로 와이파이를 적어 넣는 길이다(portal.h).
-  if (portalBootHold()) portalStart("켤 때 화면을 누르고 있었다");
-  else                  wifiService();     // 붙어 보기 시작(기다리지 않는다)
+#if PORTAL_ENABLE
+  // 켤 때 화면을 눌러 설정 모드로 들어가는 창 — **보는 것은 loop 다**(아래 '켤 때 누르기').
+  // 여기서 기다리지 않는 까닭: 기다리면 그만큼 와이파이에 늦게 붙고, 그래도 '그 순간'
+  // 하나만 보게 되어 손이 빗나간다.
+  if (PORTAL_BOOT_HOLD_MS)
+    Serial.printf("[설정] 지금부터 %.1f초 동안, 화면을 %.1f초 누르고 있으면 설정 모드로 간다\n",
+                  PORTAL_BOOT_WINDOW_MS / 1000.0, PORTAL_BOOT_HOLD_MS / 1000.0);
+#endif
+  wifiService();     // 붙어 보기 시작(기다리지 않는다)
 }
 
 void loop() {
@@ -2743,6 +2732,36 @@ void loop() {
 
   // 터치 — 짧게: (NFC 화면이면 대기로 / 대기 화면이면 다음 사진),  길게: 서버에서 사진 동기화
   const bool down = touching();
+
+#if PORTAL_ENABLE
+  // ── 켤 때 누르기 — 설정 모드로 가는 길 (config.h 의 PORTAL_BOOT_*) ──
+  // 전원을 넣고 PORTAL_BOOT_WINDOW_MS 안에 화면을 PORTAL_BOOT_HOLD_MS 쥐고 있으면 된다.
+  // 창이 열려 있는 동안에는 '사진 동기화'(길게 누르기)보다 이쪽이 먼저 걸린다 —
+  // 쥐는 시간이 더 짧기 때문이다(1000 < 1200). 그 사이 동기화를 하려면 창이 닫힌 뒤에.
+  if (PORTAL_BOOT_HOLD_MS && millis() < PORTAL_BOOT_WINDOW_MS) {
+    static uint32_t bootHoldAt = 0;   // 창 안에서 손가락이 닿기 시작한 때
+    static bool     bootSaid   = false;
+    if (down) {
+      if (!bootHoldAt) bootHoldAt = millis();
+      if (!bootSaid) { drawStatus("그대로 누르고 계세요"); bootSaid = true; }
+      if (millis() - bootHoldAt >= PORTAL_BOOT_HOLD_MS) {
+        // 떼는 손이 '짧게 누름'(= 다음 사진)으로 읽히지 않게 셈을 접어 둔다 —
+        // 설정 모드를 걷고 돌아왔을 때 사진이 한 장 넘어가 있으면 어리둥절하다.
+        wasDown = false;
+        longFired = true;
+        portalStart("켤 때 화면을 누르고 있었다");
+        return;
+      }
+    } else if (bootHoldAt) {
+      bootHoldAt = 0;
+      if (bootSaid) {
+        bootSaid = false;
+        Serial.println("[설정] 손을 뗐다 — 평소대로 간다(창이 닫히기 전이면 다시 눌러도 된다)");
+        drawIdle();
+      }
+    }
+  }
+#endif
   if (down && !wasDown) { downAt = millis(); longFired = false; }     // 누르기 시작
   if (down && !longFired && (millis() - downAt) >= LONG_PRESS_MS) {
     longFired = true;                                                 // 누르는 동안 한 번만
