@@ -27,3 +27,8 @@
 // 서버는 이 값으로 어느 교회의 기기인지 가른다(tenant/resolve.js 의 cidByKey).
 // ★ 새면 그 교회의 포인트를 올릴 수 있다. 공개 저장소·채팅·스크린샷에 올리지 말 것.
 #define TALENT_DEVICE_KEY "여기에-기기-키"
+
+// ── 시험 보드 와이파이 (nfcProject/singleTest) ───────────────────────
+// 시험할 때 붙는 한 곳(폰 핫스팟 등). 폰으로 넣은 와이파이(NVS)가 이보다 앞선다.
+#define WIFI_SSID_TEST "test-ssid"
+#define WIFI_PASS_TEST "test-password"
