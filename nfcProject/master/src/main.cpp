@@ -8,9 +8,11 @@
 //   4) 외부(NFC 시스템)가 붙어 명령을 보내면 그에 맞춰 화면을 바꾼다
 //
 // ── 화면 세 가지 ────────────────────────────────────────────────────
-//   1) 대기 화면  : 항상 '사용 활성'(useEnable) 그림에서 시작한다. 비활성 그림은 더 쓰지 않는다.
+//   1) 대기 화면  : 홈은 펀펀포인트 사진(48×48)을 바둑판으로 깐 화면이다(singleTest 와 같다 —
+//                   원 안에 통째로 드는 칸에만, 가운데부터 바깥쪽으로. 한 사람은 한 칸).
 //                   화면을 짧게 누르면(또는 시리얼 'n') microSD 에 받아 둔 사진이 순서대로 넘어간다 —
-//                   활성 → 사진1 → 사진2 → … → 사진N → 다시 활성.
+//                   홈 → 사진1 → 사진2 → … → 사진N → 다시 홈.
+//                   48 사진은 PHOTO_REFRESH_MS(5분)마다 다시 받는다 — 아래 '사진 다시 받기'.
 //   2) 원격 전환  : WebSocket 으로 enable(=활성으로) / toggle·next(=다음 사진) 가 오면 바뀐다.
 //   3) NFC 화면   : 리더(nfcProjectClient)가 카드 UID 를 보내면, 이 기기가 서버에 이름·잔액을
 //                   물어 그 UID 의 사진을 전체화면으로 덮고 위에 이름(상단)·잔여 포인트(하단)를 얹는다.
@@ -43,8 +45,19 @@
 //      화면 한 장을 옮기는 동안에는 고리(아래)를 쉬게 했다.
 //
 // ── 불러오는 중 표시 ────────────────────────────────────────────────
-//   서버에 무엇을 물을 때(조회·출석·설정·사진) 화면 테두리를 금색 고리가 돈다.
-//   따로 띄운 일꾼이 그린다 — 서버 왕복이 loop 를 붙잡고 있는 동안에도 돌아간다.
+//   서버에 무엇을 물을 때(조회·출석·설정·사진) 화면 테두리에 금색 고리 조각을 얹는다.
+//   ★ 받는 동안에는 그리지 않는다(2026-11-04) — 요청 **앞에** 한 번 얹고 끝난 **뒤에** 지운다.
+//     예전엔 따로 띄운 일꾼이 받는 동안 고리를 돌렸는데, 와이파이로 받는 일과 화면에 쓰는 일이
+//     PSRAM 을 함께 두드리면 패널이 그림을 제때 못 읽어 밀린다(singleTest 에서 확인한 것).
+//     요청이 잇따르면(사진 여럿) 조각이 한 칸씩 옮겨 앉아 도는 것처럼 보인다.
+//
+// ── 사진 다시 받기 (5분마다 · 켤 때 · 화면 길게 누르기) ─────────────
+//   화면을 검게 지우고 가운데에 도는 점 고리와 '사진 받는 중' 한 줄을 띄운 채 받는다.
+//   점은 **요청과 요청 사이에서만** 한 칸씩 옮긴다 — 받는 중에는 화면에 아무것도 쓰지 않는다.
+//     1) 홈 바둑판 — GET /api/talent/roster?px=48&all=1 로 이름표를 받아 바뀐 48 만 받는다.
+//        받은 것은 microSD /p48/<img> 에 두고, 차례는 /p48.lst 에 적어 켤 때 거기서 바로 깐다.
+//     2) 큰 사진(480) — 아래 '사진 동기화' 와 같다(바뀐 것만 받는다).
+//   다 받으면 홈부터 다시 그린다. 대기 화면일 때만 한다(NFC·일괄 화면을 끊지 않는다).
 //
 // ── 사진 동기화 (화면 길게 누르기) ──────────────────────────────────
 //   화면을 LONG_PRESS_MS 이상 누르면 펀펀포인트 서버(config.h 의 TALENT_SERVER)에서
@@ -112,7 +125,7 @@
 //   자세한 것은 portal.h(설정 모드)와 creds.h(목록 규칙) 머리말에.
 //
 // ── 시리얼 명령 (115200) ────────────────────────────────────────────
-//   n 다음 사진 · p 이전 사진 · h 활성 화면으로 · s 사진 목록 · l SD 파일 목록 · r 재부팅 · ? 도움말
+//   n 다음 사진 · p 이전 사진 · h 홈(바둑판)으로 · s 사진 목록 · l SD 파일 목록 · r 재부팅 · ? 도움말
 //   w 와이파이 설정 모드로 들어가기(설정 모드에서 'w' 를 또 치면 걷는다)
 //   W 폰으로 넣은 와이파이를 모두 잊기(구울 때 넣은 네 벌은 남는다 — 다시 세우면 반영)
 //   t 시험 NFC 화면(카드·서버 없이 이름·포인트·기분을 띄워 글자를 본다 — 누를 때마다 다음 보기)
@@ -123,6 +136,7 @@
 // useEnable.h 를 --var USEENABLE 로 다시 만들어 이 폴더에 덮어쓴다.
 
 #include <Arduino.h>
+#include <algorithm>             // 바둑판 칸 차례(std::sort)
 #include <Wire.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
@@ -266,13 +280,33 @@ static bool hubTarget(char *host, size_t cap, uint16_t *port, bool *ssl) {
 }
 
 // ── 대기 화면 사진 목록 (터치·시리얼로 순차 전환) ────────────────────
-// 0번은 언제나 활성 그림(내장 USEENABLE), 1번부터는 microSD /talent/<UID>.565 사진이다.
+// 0번은 언제나 홈 바둑판(48 사진 — 아래 GRID_*), 1번부터는 microSD /talent/<UID>.565 사진이다.
 // 목록은 부팅 때와 동기화(길게 누르기) 뒤에 SD 를 훑어 다시 만든다(scanPhotos). 이름 순 정렬.
 #define MAX_PHOTOS 200
 #define UID_MAX    24                    // UID 문자열 한 개의 최대 길이(널 포함)
 static char photoUids[MAX_PHOTOS][UID_MAX]; // SD 사진의 UID(파일 이름에서 .565 를 뗀 것)
 static int  sdPhotoCount = 0;
 static int  bufIdx = -1;                 // photoBuf 에 지금 담긴 대기 사진 번호(-1 = 모름) — 같은 사진을 또 읽지 않게
+
+// ── 홈 바둑판 (48 사진) ─────────────────────────────────────────────
+// 서버가 만들어 주는 가장 작은 크기(funfunServer talentPhoto.js 의 DEVICE_SIZES)다. 48 은 동그라미로
+// 잘라 주고 원 바깥은 비침색(자홍)으로 채운다 — 받자마자 검정으로 바꾼다(singleTest 와 같다).
+#define GRID_PX          48
+#define GRID_BYTES       (GRID_PX * GRID_PX * 2)   // 4608B
+#define GRID_N           (480 / GRID_PX)           // 한 줄 칸 수 — 10×10
+#define GRID_MAX         64                        // 들고 있을 장 수(원 안에 드는 칸이 그보다 적다)
+#define GRID_IMG_MAX     64                        // img 이름 길이(ph-<해시>-48.565 · nm-…)
+#define GRID_TRANSPARENT 0xF81F                    // funfunServer talent/rgb565.js 의 TRANSPARENT_KEY
+#define GRID_DIR         "/p48"                    // 받은 48 을 두는 곳(microSD)
+#define GRID_LIST        "/p48.lst"                // 바둑판 차례 — 켤 때 서버 없이 바로 깔려고
+
+// 큰 표는 PSRAM 에 둔다 — mbedTLS 는 내부 RAM 에서만 잡아 내부 RAM 은 아껴 쓴다(singleTest 와 같다).
+// PSRAM 은 전역 생성자보다 먼저 힙에 들어온다.
+template <typename T> static T &psram() { return *static_cast<T *>(ps_calloc(1, sizeof(T))); }
+typedef char GridNames[GRID_MAX][GRID_IMG_MAX];
+static GridNames &gridImg = psram<GridNames>();   // 바둑판에 깔린 사진의 img 이름(차례대로)
+static uint16_t  *gridPx[GRID_MAX];               // 그 픽셀(PSRAM, 한 장 4.6KB)
+static int        gridCount = 0;
 
 // ── UID 별 사진 (NFC 태그 시) ───────────────────────────────────────
 // 지금은 기기에 내장한 사진을 UID 에 연결한다. microSD 를 넣으면 loadPhotoForUid() 안에서
@@ -868,30 +902,26 @@ static void drawStatus(const char *msg) {
   drawCenteredUTF8(msg, 240, 240, PX_STATUS, COL_WHITE);
 }
 
-// ── 불러오는 중 표시 (가장자리를 도는 고리) ─────────────────────────
+// ── 불러오는 중 표시 (가장자리 고리 조각) ───────────────────────────
 // 서버에 무엇을 물을 때(이름·잔액 조회, 출석 지급, 설정 받기, 사진 내려받기)
-// 화면 테두리를 따라 짧은 금색 고리가 돈다 — 멈춰 있는 것과 기다리는 중인 것을 가른다.
-// 서버 왕복은 수백 ms 동안 loop 를 붙잡고 있어서, 그리는 일은 따로 띄운 작은 일꾼이 맡는다.
-// 그 사이 loop 는 소켓을 기다리며 쉬고 있으므로 이 일꾼이 돌 틈이 난다.
+// 화면 테두리에 짧은 금색 고리 조각을 얹는다 — 멈춰 있는 것과 기다리는 중인 것을 가른다.
+// ★ **요청 앞에 한 번 얹고, 끝난 뒤에 지운다.** 받는 동안에는 화면에 쓰지 않는다(2026-11-04).
+//   예전엔 따로 띄운 일꾼이 받는 동안 내내 고리를 돌렸다 — 와이파이로 받는 일과 화면에 쓰는 일이
+//   겹치면 패널이 PSRAM 의 그림을 제때 못 읽어 밀린다(singleTest 에서 받기와 그리기만 안 겹치면
+//   와이파이를 붙인 채로도 안 밀리는 것을 확인했다). 요청이 잇따르면(사진 여럿) 부를 때마다
+//   조각이 한 칸씩 옮겨 앉아 도는 것처럼 보인다.
 // 지울 때는 frame(지금 화면 그림)에서 그 자리 색을 되살린다 — 배경을 다시 그릴 필요가 없다.
-// 그림은 gfx->writePixelPreclipped 로 화면 버퍼에 바로 쓴다(startWrite 묶음을 건드리지 않는다 —
-// loop 가 한창 그리는 중일 수 있어, 둘이 같은 묶음 상태를 주무르면 화면이 얼룩진다).
+// 사진 다시 받기(가운데 점 고리 화면) 중에는 얹지 않는다(loadingOn).
 #define SPIN_R_IN    226         // 고리 안쪽 반지름(화면 반지름은 240)
 #define SPIN_R_OUT   236         // 고리 바깥쪽 반지름
 #define SPIN_SPAN    50          // 고리 조각이 덮는 각도
-#define SPIN_STEP    14          // 한 칸에 도는 각도
-#define SPIN_MS      40          // 한 칸 도는 데 걸리는 시간
+#define SPIN_STEP    30          // 새 요청마다 옮겨 앉는 각도
 #define SPIN_COLOR   COL_GOLD
 
-static volatile bool spinWant = false;   // 돌려 달라(서버와 이야기하는 동안)
-static volatile bool spinBusy = false;   // 지금 화면에 조각이 올라가 있다
-// 겹쳐 부른 횟수(사진 동기화 안에서 또 부른다). **이것만 volatile 이 아니다** —
-// 위 셋과 달리 고리 task 는 이 값을 보지 않는다. spinStart/spinStop(= Spinner) 만
-// 건드리고, 그 여섯 자리는 모두 loop 쪽에서 불린다. 붙여 봐야 C++20 에서 ++/-- 가
-// deprecated 라 경고만 뜨고, volatile 은 atomic 이 아니라 task 사이에서도 안전하지 않다.
-static int spinDepth = 0;
-static volatile bool spinPause = false;  // 화면을 통째로 옮기는 중 — 잠깐 비켜 있어라
-static int spinAt = 0;                   // 지금 조각이 놓인 각도
+static bool spinBusy = false;    // 지금 화면에 조각이 올라가 있다
+static int  spinDepth = 0;       // 겹쳐 부른 횟수(사진 동기화 안에서 또 부른다) — 0 이 되면 지운다
+static int  spinAt = 0;          // 지금 조각이 놓인 각도
+static bool loadingOn = false;   // 사진 다시 받기 화면이 떠 있다 — 아래 '사진 다시 받기 화면'
 
 // 고리 조각 하나를 그리거나(erase=false) 지운다(erase=true — frame 의 색으로 되돌린다).
 static void spinArc(int deg, bool erase) {
@@ -907,47 +937,98 @@ static void spinArc(int deg, bool erase) {
   }
 }
 
-// 화면 한 장(460KB)을 통째로 패널에 옮기는 동안에는 고리를 쉬게 한다 —
-// 같은 순간에 둘이 PSRAM 을 두드리면 패널이 그림을 제때 못 읽어 화면이 밀린다.
-// 통째로 다시 깔렸으니 앞 조각은 저절로 지워진 셈이라 지울 필요도 없다.
+// frame 을 화면에 통째로 옮긴다. 앞 조각은 저절로 지워진 셈이다.
 static void blitFrame() {
-  spinPause = true;
   gfx->draw16bitRGBBitmap(0, 0, frame, 480, 480);
-  spinBusy  = false;
-  spinPause = false;
+  spinBusy = false;
 }
 
-static void spinnerTask(void *) {
-  for (;;) {
-    if (spinPause) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
-    if (!spinWant) {
-      if (spinBusy) { spinArc(spinAt, true); spinBusy = false; }   // 마지막 조각을 치운다
-      vTaskDelay(pdMS_TO_TICKS(20));
-      continue;
-    }
-    if (spinBusy) spinArc(spinAt, true);                 // 앞 조각을 지우고
-    spinAt = (spinAt + SPIN_STEP) % 360;
-    spinArc(spinAt, false);                              // 한 칸 옮겨 그린다
-    spinBusy = true;
-    vTaskDelay(pdMS_TO_TICKS(SPIN_MS));
-  }
+// 요청 앞 — 조각을 한 칸 옮겨 얹는다. 겹쳐 부르면 맨 바깥 것만 그린다.
+static void spinStart() {
+  if (spinDepth++ > 0 || loadingOn) return;
+  if (spinBusy) spinArc(spinAt, true);
+  spinAt = (spinAt + SPIN_STEP) % 360;
+  spinArc(spinAt, false);
+  spinBusy = true;
 }
 
-static void spinStart() { spinDepth++; spinWant = true; }
-
+// 요청 뒤 — 맨 바깥 것이 끝나면 조각을 지운다.
 static void spinStop() {
-  if (--spinDepth > 0) return;                           // 겹쳐 부른 것이 남았다 — 계속 돈다
+  if (--spinDepth > 0) return;           // 겹쳐 부른 것이 남았다
   spinDepth = 0;
-  spinWant = false;
-  for (int i = 0; i < 100 && spinBusy; i++) vTaskDelay(pdMS_TO_TICKS(5));   // 조각이 치워질 때까지
+  if (spinBusy) { spinArc(spinAt, true); spinBusy = false; }
 }
 
 // 서버를 부르는 함수 맨 앞에 'Spinner spin;' 한 줄만 두면 된다 —
-// 어느 길로 함수를 빠져나가도(중간 return 이 여럿이다) 고리가 반드시 멈춘다.
+// 어느 길로 함수를 빠져나가도(중간 return 이 여럿이다) 조각이 반드시 지워진다.
+// 사진을 여럿 받는 자리(downloadPhoto)는 장마다 이것을 둔다 — 장 사이에서 한 칸씩 돈다.
 struct Spinner {
   Spinner()  { spinStart(); }
   ~Spinner() { spinStop(); }
 };
+
+// ── 사진 다시 받기 화면 ─────────────────────────────────────────────
+// 검은 화면 가운데에 점 여덟 개가 도는 고리, 그 아래에 무엇을 받는 중인지 한 줄(singleTest 와 같다).
+// ★ **요청과 요청 사이에서만** 그린다 — loadingStep 은 받는 쪽이 요청 하나를 끝낼 때마다 부른다.
+//   받는 동안 화면에 쓰지 않으니 와이파이와 그리기가 겹치지 않는다. 한 걸음에 작은 점 여덟 개
+//   (1KB 남짓)뿐이라 그리는 시간도 짧다. 다 받으면 홈이 화면을 통째로 다시 쓰므로 따로 지우지 않는다.
+#define LOAD_CY        220
+#define LOAD_R         26               // 고리 반지름
+#define LOAD_DOT       5                // 점 반지름
+#define LOAD_DOTS      8
+#define LOAD_STEP_MS   110              // 점이 한 칸 도는 가장 짧은 간격
+#define LOAD_MSG_CY    300
+
+static int      loadHead = 0;
+static uint32_t loadAt   = 0;
+static char     loadMsgShown[64] = "";
+
+static void loadingDots() {
+  static const uint16_t SHADE[LOAD_DOTS] = { 0xFFFF, 0xC618, 0x8410, 0x528A, 0x3186, 0x2104, 0x2104, 0x2104 };
+  for (int i = 0; i < LOAD_DOTS; i++) {
+    const float a = 2 * PI * i / LOAD_DOTS - PI / 2;      // 12시부터 시계 방향
+    const int x = 240 + (int)lroundf(LOAD_R * cosf(a)), y = LOAD_CY + (int)lroundf(LOAD_R * sinf(a));
+    const int back = (loadHead - i + LOAD_DOTS) % LOAD_DOTS;   // 머리에서 몇 칸 뒤인가 — 뒤일수록 어둡다
+    gfx->fillCircle(x, y, LOAD_DOT, SHADE[back]);
+  }
+}
+
+// 글 한 줄을 바꾼다 — 같은 글이면 그리지 않는다.
+static void loadingMsg(const char *msg) {
+  if (!loadingOn || !strcmp(msg, loadMsgShown)) return;
+  strlcpy(loadMsgShown, msg, sizeof(loadMsgShown));
+  gfx->fillRect(40, LOAD_MSG_CY - 26, 400, 52, 0x0000);
+  drawCenteredUTF8(msg, 240, LOAD_MSG_CY, PX_STATUS, COL_WHITE);
+}
+
+// 점을 한 칸 돌린다(LOAD_STEP_MS 가 안 지났으면 그대로). 요청 사이에서 부른다.
+static void loadingStep() {
+  if (!loadingOn) return;
+  const uint32_t now = millis();
+  if (now - loadAt < LOAD_STEP_MS) return;
+  loadAt = now;
+  loadHead = (loadHead + 1) % LOAD_DOTS;
+  loadingDots();
+}
+
+// 받기 전 — 화면을 검게 지우고 고리와 글을 띄운다. 앞에 얹혀 있던 테두리 조각도 함께 지워진다.
+static void loadingBegin(const char *msg) {
+  if (frame) { memset(frame, 0, 480 * 480 * sizeof(uint16_t)); blitFrame(); }
+  else       gfx->fillScreen(0x0000);
+  loadingOn = true;
+  loadMsgShown[0] = '\0';
+  loadAt = millis();
+  loadingDots();
+  loadingMsg(msg);
+}
+
+// 받는 것 없이 ms 동안 고리만 돌리며 둔다(끝 안내를 읽을 틈).
+static void loadingHold(uint32_t ms) {
+  const uint32_t t0 = millis();
+  while (millis() - t0 < ms) { loadingStep(); delay(10); }
+}
+
+static void loadingEnd() { loadingOn = false; }
 
 // ── client 연결 상태 점 ─────────────────────────────────────────────
 // (enum LinkState 는 맨 위 '점' 설정 옆에 있다 — 함수 원형보다 앞이라야 한다)
@@ -998,14 +1079,89 @@ static const uint16_t *idlePixels(int idx) {
   return photoBuf;
 }
 
-// 대기 화면 — 지금 사진 + (붙어 있으면) 연결 아이콘.
+// ── 홈 바둑판 그리기 (singleTest 와 같은 자리·차례) ────────────────
+// 칸이 원형 화면 안에 통째로 드나 — 가운데에서 가장 먼 모서리가 반지름(240) 안이면 된다.
+static bool cellInside(int x0, int y0) {
+  const int dx = max(abs(x0 - 240), abs(x0 + GRID_PX - 240));
+  const int dy = max(abs(y0 - 240), abs(y0 + GRID_PX - 240));
+  return dx * dx + dy * dy <= 240 * 240;
+}
+
+// 원 안의 칸을 놓을 차례대로(칸 번호 k = 줄 × GRID_N + 칸). 처음 그릴 때 한 번 만든다.
+// 칸 가운데가 화면 가운데에 가까운 것부터 — 거리가 같은 칸끼리는 12시에서 시계 방향으로.
+static int cellOrder[GRID_N * GRID_N];
+static int cellCount = 0;
+
+static void buildCellOrder() {
+  for (int k = 0; k < GRID_N * GRID_N; k++)
+    if (cellInside((k % GRID_N) * GRID_PX, (k / GRID_N) * GRID_PX)) cellOrder[cellCount++] = k;
+  auto dist2 = [](int k) {
+    const int dx = (k % GRID_N) * GRID_PX + GRID_PX / 2 - 240;
+    const int dy = (k / GRID_N) * GRID_PX + GRID_PX / 2 - 240;
+    return dx * dx + dy * dy;
+  };
+  auto angle = [](int k) {                       // 12시가 0, 시계 방향으로 커진다(화면은 y 가 아래로 는다)
+    const float dx = (k % GRID_N) * GRID_PX + GRID_PX / 2 - 240;
+    const float dy = (k / GRID_N) * GRID_PX + GRID_PX / 2 - 240;
+    const float a = atan2f(dx, -dy);
+    return a < 0 ? a + 2 * PI : a;
+  };
+  std::sort(cellOrder, cellOrder + cellCount, [&](int a, int b) {
+    const int da = dist2(a), db = dist2(b);
+    return da != db ? da < db : angle(a) < angle(b);
+  });
+}
+
+// frame 에 바둑판 한 장을 맞춘다 — 사진이 없는 자리는 검정. 칸이 모자라면 남은 사진은 놓지 않는다.
+// 한 줄(480px)씩 이어서 채운다(칸마다 흩어 쓰지 않는다 — singleTest drawGrid 머리말).
+static void composeGrid(uint16_t *dst) {
+  if (!cellCount) buildCellOrder();
+  int8_t slot[GRID_N * GRID_N];                  // 칸마다 놓을 사진 번호(-1 = 비움)
+  memset(slot, -1, sizeof(slot));
+  for (int j = 0; j < cellCount && j < gridCount; j++) slot[cellOrder[j]] = j;
+  for (int y = 0; y < GRID_N * GRID_PX; y++) {
+    const int8_t *s = slot + (y / GRID_PX) * GRID_N;
+    const int py = y % GRID_PX;
+    uint16_t *line = dst + y * 480;
+    for (int c = 0; c < GRID_N; c++) {
+      uint16_t *d = line + c * GRID_PX;
+      if (s[c] >= 0) memcpy(d, gridPx[s[c]] + py * GRID_PX, GRID_PX * 2);
+      else           memset(d, 0, GRID_PX * 2);   // 검정(0x0000)
+    }
+  }
+}
+
+// 바둑판을 화면에 — frame 을 못 잡았으면 칸마다 바로 그린다.
+static void drawGrid() {
+  if (frame) {
+    composeGrid(frame);
+    blitFrame();
+    return;
+  }
+  if (!cellCount) buildCellOrder();
+  gfx->fillScreen(0x0000);
+  for (int j = 0; j < cellCount && j < gridCount; j++) {
+    const int k = cellOrder[j];
+    gfx->draw16bitRGBBitmap((k % GRID_N) * GRID_PX, (k / GRID_N) * GRID_PX, gridPx[j], GRID_PX, GRID_PX);
+  }
+}
+
+// 대기 화면 — 홈(0)은 바둑판, 그 밖은 SD 사진 + (붙어 있으면) 연결 아이콘.
+// 바둑판에는 연결 아이콘을 얹지 않는다 — 사진 칸에 걸린다(상단 점이 연결 상태를 대신 보여 준다).
 static void drawIdle() {
   if (photoIdx < 0 || photoIdx >= photoTotal()) photoIdx = 0;
+  if (photoIdx == 0) {
+    drawGrid();
+    drawLinkDot();
+    Serial.printf("대기 화면: 홈 바둑판 %d장 (칸 %d)\n", gridCount, cellCount);
+    return;
+  }
   const uint16_t *px = idlePixels(photoIdx);
   if (!px) {                                           // SD 사진을 못 읽으면 활성 그림으로 돌아간다
-    Serial.printf("대기 화면: 사진 #%d(%s) 을 못 읽어 활성 화면으로\n", photoIdx, photoLabel(photoIdx));
+    Serial.printf("대기 화면: 사진 #%d(%s) 을 못 읽어 홈으로\n", photoIdx, photoLabel(photoIdx));
     photoIdx = 0;
-    px = USEENABLE;
+    drawIdle();
+    return;
   }
   if (!frame) {                                        // 버퍼를 못 잡았으면 배경만이라도
     gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)px, 480, 480);
@@ -1234,7 +1390,7 @@ static void showPhoto(int idx) {
 // 순차 전환 — 터치·시리얼 n/p·WebSocket toggle/next/prev.
 static void nextPhoto() { showPhoto(photoIdx + 1); }
 static void prevPhoto() { showPhoto(photoIdx - 1); }
-static void homePhoto() { showPhoto(0); }            // 활성 화면으로
+static void homePhoto() { showPhoto(0); }            // 홈(바둑판)으로
 
 // 파일 이름을 가나다(바이트) 순으로 — 매번 같은 순서로 넘어가게.
 static int cmpUid(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
@@ -1263,7 +1419,7 @@ static void scanPhotos() {
   }
   qsort(photoUids, sdPhotoCount, sizeof(photoUids[0]), cmpUid);
   if (photoIdx >= photoTotal()) photoIdx = 0;
-  Serial.printf("[사진] 넘겨 볼 사진: 활성 화면 + SD %d 장\n", sdPhotoCount);
+  Serial.printf("[사진] 넘겨 볼 사진: 홈 바둑판 + SD %d 장\n", sdPhotoCount);
 }
 
 // 넘겨 볼 사진 목록을 시리얼에 찍는다('s').
@@ -1706,29 +1862,223 @@ static int pruneUnusedPhotos(const char keep[][UID_MAX], int keepCount) {
   return gone;
 }
 
-// 서버 이름표를 받아, 사진이 있는 UID 마다 480 사진을 내려받아 SD 로 동기화한다.
-static void syncPhotos() {
-  Spinner spin;                                 // 이름표부터 사진까지 — 끝날 때까지 돈다
-  if (WiFi.status() != WL_CONNECTED) { drawStatus("와이파이가 없습니다"); delay(1500); goIdle(); return; }
-  if (!sdReady)                      { drawStatus("SD 카드가 없습니다"); delay(1500); goIdle(); return; }
+// ── 홈 바둑판 사진(48) 두기 ────────────────────────────────────────
+// 받은 48 을 microSD 의 /p48/<img> 에 둔다 — img 이름에 사진 해시가 들어 있어 이름이 같으면
+// 같은 사진이다(바뀌면 이름이 달라 새로 받는다). 바둑판 차례는 /p48.lst 에 한 줄씩 적어 두고,
+// 켤 때 거기서 읽어 서버 없이 곧바로 깐다(gridBootLoad).
+// SD(SDMMC)는 플래시와 달리 만지는 동안 캐시를 끄지 않는다 — singleTest(LittleFS)처럼 검은 화면을
+// 기다릴 까닭은 없다. 그래도 받는 김에 받는 화면에서만 만진다.
+static bool gridPath(const char *img, char *out, size_t cap) {
+  return snprintf(out, cap, GRID_DIR "/%s", img) < (int)cap;
+}
 
-  drawStatus("이름표 받는 중...");
-  char url[160];
-  snprintf(url, sizeof(url), "%s/api/talent/roster?px=%d", TALENT_SERVER, TALENT_PX);
+static bool gridCacheLoad(const char *img, uint16_t *dst) {
+  char path[96];
+  if (!sdReady || !gridPath(img, path, sizeof(path)) || !SD_MMC.exists(path)) return false;
+  File f = SD_MMC.open(path, FILE_READ);
+  if (!f) return false;
+  const bool ok = f.size() == GRID_BYTES && f.read((uint8_t *)dst, GRID_BYTES) == GRID_BYTES;
+  f.close();
+  return ok;
+}
 
-  const int code = httpGet(url);
-  if (code != HTTP_CODE_OK) {
-    http.end();
-    char m[40]; snprintf(m, sizeof(m), "이름표 실패 (%d)", code);
-    drawStatus(m); delay(2000); goIdle(); return;
+static void gridCacheSave(const char *img, const uint16_t *src) {
+  char path[96];
+  if (!sdReady || !gridPath(img, path, sizeof(path))) return;
+  File f = SD_MMC.open(path, FILE_WRITE);
+  if (!f) return;
+  const bool ok = f.write((const uint8_t *)src, GRID_BYTES) == GRID_BYTES;
+  f.close();
+  if (!ok) SD_MMC.remove(path);             // 반쪽짜리를 남기지 않는다(자리가 모자랐다)
+}
+
+// 바둑판 차례를 적는다 — 다음에 켤 때 이 차례 그대로 깐다.
+static void gridListSave() {
+  if (!sdReady) return;
+  File f = SD_MMC.open(GRID_LIST, FILE_WRITE);
+  if (!f) return;
+  for (int i = 0; i < gridCount; i++) { f.print(gridImg[i]); f.print('\n'); }
+  f.close();
+}
+
+// 바둑판에서 빠진 48 을 지운다 — 사진이 바뀔 때마다 옛것이 쌓이지 않게. 지운 장 수.
+// 폴더를 훑는 동안 지우지 않는다(FAT 목록이 흔들린다) — 모아서 지우고 다시 훑는다.
+static int gridPrune() {
+  if (!sdReady) return 0;
+  static char drop[16][GRID_IMG_MAX];
+  int total = 0;
+  for (;;) {
+    int k = 0;
+    File dir = SD_MMC.open(GRID_DIR);
+    if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return total; }
+    for (File f = dir.openNextFile(); f && k < 16; f = dir.openNextFile()) {
+      const char *nm = f.name();                     // 코어 3.x 는 경로 없이 이름만 준다
+      const char *sl = strrchr(nm, '/'); if (sl) nm = sl + 1;
+      bool keep = f.isDirectory() || strlen(nm) >= GRID_IMG_MAX;
+      for (int i = 0; i < gridCount && !keep; i++) keep = !strcmp(gridImg[i], nm);
+      if (!keep) strlcpy(drop[k++], nm, GRID_IMG_MAX);
+      f.close();
+    }
+    dir.close();
+    int gone = 0;
+    for (int i = 0; i < k; i++) {
+      char path[96];
+      if (gridPath(drop[i], path, sizeof(path)) && SD_MMC.remove(path)) gone++;
+    }
+    total += gone;
+    if (k < 16 || !gone) return total;      // 다 훑었다 — 또는 지우지 못해 같은 것만 다시 나온다
   }
+}
+
+// 켤 때 — /p48.lst 의 차례대로 SD 에서 읽어 바둑판을 채운다(서버 없이).
+static void gridBootLoad() {
+  if (!sdReady) return;
+  SD_MMC.mkdir(GRID_DIR);
+  if (!SD_MMC.exists(GRID_LIST)) { Serial.println("[바둑판] 받아 둔 것이 없다 — 와이파이에 붙으면 받는다"); return; }
+  File f = SD_MMC.open(GRID_LIST, FILE_READ);
+  if (!f) return;
+  int n = 0, miss = 0;
+  while (f.available() && n < GRID_MAX) {
+    String s = f.readStringUntil('\n');
+    s.trim();
+    if (!s.length() || s.length() >= GRID_IMG_MAX) continue;
+    uint16_t *buf = (uint16_t *)ps_malloc(GRID_BYTES);
+    if (!buf) break;
+    if (!gridCacheLoad(s.c_str(), buf)) { free(buf); miss++; continue; }
+    strcpy(gridImg[n], s.c_str());
+    gridPx[n++] = buf;
+  }
+  f.close();
+  gridCount = n;
+  Serial.printf("[바둑판] SD 에서 %d장 깔았다(없는 것 %d)\n", n, miss);
+}
+
+// ── 홈 바둑판 사진(48) 받기 ────────────────────────────────────────
+// 사진 한 장을 dst(PSRAM)에 바로 받는다. 크기가 꼭 맞아야 true. 원 바깥(비침색)은 검정으로.
+static bool fetchGridPhoto(const char *img, uint16_t *dst) {
+  char url[192];
+  snprintf(url, sizeof(url), "%s/api/talent/photo/device/%s", TALENT_SERVER, img);
+  const int code = httpGet(url);
+  if (code != HTTP_CODE_OK) { http.end(); Serial.printf("[바둑판] %s 실패 code=%d\n", img, code); return false; }
+
+  WiFiClient *stream = http.getStreamPtr();
+  uint8_t *p = (uint8_t *)dst;
+  size_t got = 0;
+  uint32_t idleAt = millis();
+  while (http.connected() && got < GRID_BYTES) {
+    const int avail = stream->available();
+    if (avail > 0) {
+      const size_t want = std::min((size_t)avail, (size_t)GRID_BYTES - got);
+      const int n = stream->readBytes(p + got, want);
+      if (n > 0) { got += n; idleAt = millis(); }
+    } else {
+      if (millis() - idleAt > 5000) break;          // 5초간 아무것도 안 오면 포기
+      delay(2);
+    }
+  }
+  http.end();
+  if (got != GRID_BYTES) { Serial.printf("[바둑판] %s 크기 안 맞음 %u/%u\n", img, (unsigned)got, (unsigned)GRID_BYTES); return false; }
+  for (int i = 0; i < GRID_PX * GRID_PX; i++)
+    if (dst[i] == GRID_TRANSPARENT) dst[i] = 0x0000;
+  return true;
+}
+
+// 이름표(48)를 받아 겹친 것을 뺀 img 이름들을 imgs 에 담는다. 못 받으면 -1.
+// ?all=1 — 카드를 아직 안 받은 아이까지 명단 전부. 사진이 없는 아이는 서버가 이름 그림(nm-…)을 준다.
+// 같은 사진(= 같은 사람의 다른 키링)은 한 번만 — 한 사람은 한 칸이다.
+static int fetchGridRoster(GridNames &imgs) {
+  char url[160];
+  snprintf(url, sizeof(url), "%s/api/talent/roster?px=%d&all=1", TALENT_SERVER, GRID_PX);
+  const int code = httpGet(url);
+  if (code != HTTP_CODE_OK) { http.end(); Serial.printf("[바둑판] 이름표 실패 code=%d\n", code); return -1; }
   String body = http.getString();
   http.end();
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, body);
+  if (err) { Serial.printf("[바둑판] 이름표 해석 실패: %s\n", err.c_str()); return -1; }
+
+  int n = 0;
+  for (JsonObject r : doc["data"].as<JsonArray>()) {
+    const char *img = r["img"] | "";
+    if (!img[0] || strlen(img) >= GRID_IMG_MAX || n >= GRID_MAX) continue;
+    bool dup = false;
+    for (int k = 0; k < n && !dup; k++) dup = !strcmp(imgs[k], img);
+    if (!dup) strcpy(imgs[n++], img);
+  }
+  return n;
+}
+
+// 이름표를 다시 받아 바뀐 사진만 받는다(들고 있는 것 → SD → 서버 순으로 찾는다).
+// 차례는 이름표 차례 그대로라, 한 아이의 사진이 바뀌면 그 아이의 칸에서만 갈린다.
+// 요청 하나가 끝날 때마다 loadingStep — 받는 중에는 화면에 쓰지 않는다. 이름표를 못 받으면 false.
+static bool refreshGrid() {
+  static GridNames &imgs = psram<GridNames>();
+  const int n = fetchGridRoster(imgs);
+  loadingStep();
+  if (n < 0) return false;
+
+  uint16_t *nxt[GRID_MAX];
+  int m = 0, fresh = 0, fromSd = 0;
+  for (int i = 0; i < n; i++) {
+    uint16_t *buf = nullptr;
+    for (int k = 0; k < gridCount && !buf; k++)
+      if (!strcmp(gridImg[k], imgs[i])) buf = gridPx[k];          // 이미 들고 있다
+    if (!buf) {
+      buf = (uint16_t *)ps_malloc(GRID_BYTES);
+      if (!buf) { Serial.println("[바둑판] PSRAM 이 모자라 여기까지만 받는다"); break; }
+      if (gridCacheLoad(imgs[i], buf)) {
+        fromSd++;
+      } else {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "사진 받는 중 %d/%d", i + 1, n);
+        loadingMsg(msg);                                           // 요청 앞에 그린다
+        const bool ok = fetchGridPhoto(imgs[i], buf);
+        loadingStep();                                             // 요청 뒤에 한 칸
+        if (!ok) { free(buf); continue; }
+        fresh++;
+        gridCacheSave(imgs[i], buf);
+      }
+    }
+    if (m != i) strcpy(imgs[m], imgs[i]);                          // 빠진 것을 메우며 앞으로 당긴다
+    nxt[m++] = buf;
+  }
+
+  bool same = (m == gridCount);
+  for (int i = 0; i < m && same; i++) same = (nxt[i] == gridPx[i]);
+  if (same) { Serial.printf("[바둑판] %d장 — 바뀐 것 없음\n", m); return true; }
+
+  // 안 쓰게 된 옛 버퍼를 푼다 — 그리는 것도 이 loop 라 지금 화면에서 쓰는 중인 것은 없다
+  int gone = 0;
+  for (int k = 0; k < gridCount; k++) {
+    bool kept = false;
+    for (int i = 0; i < m && !kept; i++) kept = (gridPx[k] == nxt[i]);
+    if (!kept) { free(gridPx[k]); gone++; }
+  }
+  memcpy(gridImg, imgs, sizeof(imgs[0]) * m);
+  memcpy(gridPx, nxt, sizeof(nxt[0]) * m);
+  gridCount = m;
+  gridListSave();
+  const int dropped = gridPrune();
+  Serial.printf("[바둑판] %d장 — 새로 %d · SD 에서 %d · 빠짐 %d · SD 에서 지움 %d\n", m, fresh, fromSd, gone, dropped);
+  return true;
+}
+
+// ── 큰 사진(480) 동기화 ────────────────────────────────────────────
+// 서버 이름표를 받아, 사진이 있는 UID 마다 480 사진을 내려받아 SD 로 동기화한다.
+// 바뀐 것만 받는다(photoUpToDate). 받은 것·지운 것을 fresh·gone 에 돌려준다. 이름표를 못 받으면 false.
+static bool sync480(int *fresh, int *gone) {
+  *fresh = *gone = 0;
+  char url[160];
+  snprintf(url, sizeof(url), "%s/api/talent/roster?px=%d", TALENT_SERVER, TALENT_PX);
+  const int code = httpGet(url);
+  if (code != HTTP_CODE_OK) { http.end(); Serial.printf("[동기화] 이름표 실패 code=%d\n", code); return false; }
+  String body = http.getString();
+  http.end();
+  loadingStep();
 
   JsonDocument doc;
-  if (deserializeJson(doc, body)) { drawStatus("이름표 해석 실패"); delay(2000); goIdle(); return; }
-
-  if (!doc["data"].is<JsonArray>()) { drawStatus("이름표가 비어 있습니다"); delay(2000); goIdle(); return; }
+  if (deserializeJson(doc, body)) { Serial.println("[동기화] 이름표 해석 실패"); return false; }
+  if (!doc["data"].is<JsonArray>()) { Serial.println("[동기화] 이름표가 비어 있습니다"); return false; }
   JsonArray data = doc["data"].as<JsonArray>();
   int total = 0;
   for (JsonObject r : data) if (r["img"].is<const char *>()) total++;
@@ -1749,29 +2099,68 @@ static void syncPhotos() {
     if (rosterCount < MAX_PHOTOS && strlen(uid) < UID_MAX) strcpy(rosterUids[rosterCount++], uid);
     else                                                   rosterWhole = false;
     if (photoUpToDate(uid, img)) { same++; continue; }   // 해시가 같다 — 받지 않는다
-    char m[48]; snprintf(m, sizeof(m), "사진 받는 중 %d/%d", i, total);
-    drawStatus(m);
+    char m[48]; snprintf(m, sizeof(m), "큰 사진 받는 중 %d/%d", i, total);
+    loadingMsg(m);                                        // 요청 앞에 그린다
     if (downloadPhoto(img, uid)) { ok++; Serial.printf("[동기화] %s 받음 (%s)\n", uid, img); }
+    loadingStep();                                        // 요청 뒤에 한 칸
   }
 
   // 이름표에서 빠진 사진을 지운다.
   // 이름표에 사진이 한 장도 없으면 지우지 않는다 — 서버·DB 가 잠깐 비어 빈 이름표를 받았을 때
   // 카드를 다 비워 버리면 현장에서 되돌릴 방법이 없다. 정말 다 내렸다면 카드를 직접 비우면 된다.
-  int gone = 0;
+  int pruned = 0;
   if (rosterCount == 0)   Serial.println("[동기화] 이름표에 사진이 없어 지우기는 건너뜁니다");
   else if (!rosterWhole)  Serial.println("[동기화] 이름표가 너무 커서 지우기는 건너뜁니다");
-  else                    gone = pruneUnusedPhotos(rosterUids, rosterCount);
+  else                    pruned = pruneUnusedPhotos(rosterUids, rosterCount);
 
-  // 받아 둔 캐릭터 그림도 비운다 — 그림이 바뀌었을 때 되받을 자리가 여기뿐이다(clearMoodIcons).
-  // 다시 받는 것은 그 캐릭터를 고른 아이가 처음 카드를 댈 때라, 여기서 기다릴 일은 없다.
-  const int chars = clearMoodIcons();
+  Serial.printf("[동기화] 새로 받음 %d · 그대로 %d · 실패 %d · 지움 %d (모두 %d)\n",
+                ok, same, total - ok - same, pruned, total);
+  *fresh = ok;
+  *gone  = pruned;
+  if (ok || pruned) scanPhotos();               // 새로 받은 사진까지 넘겨 볼 목록에 넣는다
+  return true;
+}
 
-  Serial.printf("[동기화] 새로 받음 %d · 그대로 %d · 실패 %d · 지움 %d (모두 %d) · 캐릭터 비움 %d\n",
-                ok, same, total - ok - same, gone, total, chars);
-  char m[48]; snprintf(m, sizeof(m), "완료 - 새 %d 장 · 지움 %d 장", ok, gone);
-  Serial.printf("[동기화] %s\n", m);
-  drawStatus(m); delay(2000);
-  scanPhotos();                                 // 새로 받은 사진까지 넘겨 볼 목록에 넣는다
+// ── 사진 다시 받기 한 바퀴 ─────────────────────────────────────────
+// 화면을 검게 지우고(loadingBegin) 홈 바둑판(48) → 큰 사진(480) 차례로 받은 뒤 홈부터 다시 그린다.
+// 받는 동안 화면에는 요청 사이에서만 점 한 칸·글 한 줄을 쓴다 — 받기와 그리기가 겹치지 않는다.
+//   manual = 화면을 길게 눌렀다: 결과를 2초 띄우고, 받아 둔 캐릭터 그림도 비운다(clearMoodIcons —
+//            그림이 바뀌었을 때 되받을 자리가 여기뿐이다. 5분마다 비우면 태깅마다 다시 받는다).
+// 그동안 WebSocket·허브는 굴리지 않는다 — 들어온 태그는 끝난 뒤에 처리된다(바뀐 것이 없으면 1초 남짓).
+static uint32_t refreshDueAt  = 0;    // 다음 다시 받기 시각(millis)
+static uint32_t lastRefreshMs = 0;    // 마지막 한 바퀴에 걸린 시간(시리얼 'i')
+
+static void refreshCycle(bool manual) {
+  refreshDueAt = millis() + PHOTO_REFRESH_MS;
+  if (WiFi.status() != WL_CONNECTED) {
+    if (manual) { loadingBegin("와이파이가 없습니다"); loadingHold(1500); loadingEnd(); goIdle(); }
+    return;
+  }
+  const uint32_t t0 = millis();
+  loadingBegin("사진 받는 중");
+  if (!refreshGrid()) Serial.println("[바둑판] 이름표를 못 받았다 — 들고 있던 것으로 둔다");
+
+  int fresh = 0, gone = 0;
+  if (sdReady) {
+    loadingMsg("큰 사진 확인 중");
+    sync480(&fresh, &gone);
+  } else if (manual) {
+    loadingMsg("SD 카드가 없습니다");
+    loadingHold(1500);
+  }
+  if (manual) {
+    const int chars = clearMoodIcons();
+    Serial.printf("[동기화] 캐릭터 그림 비움 %d\n", chars);
+    char m[48];
+    snprintf(m, sizeof(m), "완료 - 새 %d장, 지움 %d장", fresh, gone);   // '·' 는 굴림16 에 없다(fitEllipsis 머리말)
+    loadingMsg(m);
+    loadingHold(2000);
+  }
+  loadingEnd();
+  lastRefreshMs = millis() - t0;
+  Serial.printf("[다시 받기] %lums — 다음은 %lu분 뒤\n", (unsigned long)lastRefreshMs,
+                (unsigned long)(PHOTO_REFRESH_MS / 60000));
+  photoIdx = 0;                                 // 다 받으면 홈부터
   goIdle();
 }
 
@@ -2550,12 +2939,9 @@ void setup() {
   sdReady = sdBegin();           // microSD (config.h 의 SD_* 핀). 없으면 내장 사진만 쓴다
   listSD();                      // SD 에 들어 있는 사진 목록을 시리얼에 찍는다(확인용)
   scanPhotos();                  // 터치로 넘겨 볼 사진 목록
+  gridBootLoad();                // 지난번에 받아 둔 48 로 홈 바둑판을 깐다(서버 없이)
 
-  drawIdle();                    // 기본 화면 — 활성 그림, 아이콘 없음(아직 안 붙었다)
-
-  // 서버를 기다리는 동안 테두리 고리를 돌릴 일꾼. loop 와 같은 심(1)에 같은 순위로 둔다 —
-  // loop 가 소켓을 기다리며 쉬는 틈에만 돌아, 평소 화면 그리기를 밀어내지 않는다.
-  xTaskCreatePinnedToCore(spinnerTask, "spinner", 4096, nullptr, 1, nullptr, 1);
+  drawIdle();                    // 기본 화면 — 홈 바둑판(아직 와이파이 전이다)
 
   // 4) 백라이트를 마지막에 켠다 — 먼저 켜면 그리는 동안 빈 화면이 번쩍인다.
   pinMode(PIN_BL, OUTPUT);
@@ -2628,9 +3014,10 @@ void loop() {
                     WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), ch);
       startServers();            // 붙은 뒤에 mDNS·WebSocket 을 켠다
       fetchConfig();             // 밝기·출석모드를 받아 온다(못 받으면 들고 있던 값으로 돈다)
-      if (!bootSyncDone) {       // 부팅 후 처음 붙었을 때 서버에서 사진을 모두 받아 SD 에 저장
+      if (!bootSyncDone) {       // 부팅 후 처음 붙었을 때 사진을 받는다(홈 바둑판 48 · 큰 사진 480)
         bootSyncDone = true;
-        syncPhotos();
+        clearMoodIcons();        // 캐릭터 그림은 켤 때마다 비운다 — 예전 켤 때 동기화와 같다
+        refreshCycle(false);     // 끝에 홈을 그리고 상태를 알린다 — 아래 drawIdle 이 한 번 더 그린다
       }
     } else {
       Serial.println("[와이파이] 끊김");
@@ -2675,6 +3062,13 @@ void loop() {
 
   // 들고 있는 연결을 살려 둔다 — **대기 화면일 때만**. 태깅을 처리하는 중에 끼어들면
   // 아이 앞에서 왕복이 하나 늘어난다. 조용한 사이에 미리 찔러 두는 것이 요지다.
+  // 사진 다시 받기(PHOTO_REFRESH_MS 마다) — 대기 화면일 때만, 손가락이 닿아 있지 않을 때.
+  // 태깅이 줄을 서 있으면(pendingUid) 그것부터 처리했다 — 위에서 NFC 화면으로 갔으면 다음 기회에.
+  if (online && bootSyncDone && mode == MODE_IDLE && !wasDown && (int32_t)(millis() - refreshDueAt) >= 0) {
+    refreshCycle(false);
+    return;
+  }
+
   if (online && mode == MODE_IDLE && (int32_t)(millis() - httpWarmAt) >= 0) httpWarm();
 
   // client 연결 상태 점 — client 가 붙거나 떨어져 색이 바뀔 때만 다시 그린다(화면 갱신 없이도)
@@ -2686,7 +3080,7 @@ void loop() {
     switch (c) {
       case 'n': case 'N': Serial.println("[명령] 다음 사진"); if (mode == MODE_NFC || mode == MODE_BULK) goIdle(); else nextPhoto(); break;
       case 'p': case 'P': Serial.println("[명령] 이전 사진"); prevPhoto(); break;
-      case 'h': case 'H': Serial.println("[명령] 활성 화면"); homePhoto(); break;
+      case 'h': case 'H': Serial.println("[명령] 홈 바둑판"); homePhoto(); break;
       case 's': case 'S': listPhotos(); break;
       case 'l': case 'L': listSD(); break;
       case 'c': case 'C':
@@ -2709,6 +3103,10 @@ void loop() {
         Serial.printf("[상태] 서버 연결 %s\n", TALENT_HUB_ENABLE
                       ? (hubUp ? "붙어 있음" : (hubBegun ? "끊김(다시 붙는 중)" : "아직 안 켬"))
                       : "꺼 둠");
+        Serial.printf("[상태] 홈 바둑판 %d장 · 큰 사진 %d장 · 사진 다시 받기 %lus 뒤(지난번 %lums)\n",
+                      gridCount, sdPhotoCount,
+                      bootSyncDone ? (unsigned long)((int32_t)(refreshDueAt - millis()) > 0 ? (refreshDueAt - millis()) / 1000 : 0) : 0UL,
+                      (unsigned long)lastRefreshMs);
         Serial.printf("[상태] 선 %s · ws client %u곳 · 와이파이 %s\n",
                       LINK_I2C_ENABLE ? (linkAlive() ? "리더가 살아 있음" : "조용함") : "꺼 둠",
                       serversUp ? webSocket.connectedClients() : 0,
@@ -2717,7 +3115,7 @@ void loop() {
       case 't': case 'T': showTestScreen(); break;
       case 'g': case 'G':                          // 고리가 도는지 눈으로 보기(서버 없이)
         Serial.println("[명령] 불러오는 중 고리 3초");
-        spinStart(); delay(3000); spinStop();      // delay 는 쉬는 것이라 그동안 일꾼이 돈다
+        spinStart(); delay(3000); spinStop();      // 받는 동안처럼 얹어 두었다가 지운다
         break;
       case 'w':           portalStart("시리얼 명령"); return;      // 설정 모드 — 이 바퀴는 여기서 접는다
       case 'W':           credsClear(); Serial.println("[명령] 다시 세우면 반영됩니다"); break;
@@ -2765,7 +3163,7 @@ void loop() {
   if (down && !wasDown) { downAt = millis(); longFired = false; }     // 누르기 시작
   if (down && !longFired && (millis() - downAt) >= LONG_PRESS_MS) {
     longFired = true;                                                 // 누르는 동안 한 번만
-    syncPhotos();
+    refreshCycle(true);
   }
   if (!down && wasDown && !longFired) {                               // 짧게 눌렀다 뗌
     Serial.println("[터치] 짧게 누름");
