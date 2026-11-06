@@ -4,7 +4,7 @@
 // 홈(home.h)과 같은 띠 · 바탕 · '카드를 대 주세요' 를 두르고, 가운데만 바꾼다:
 //
 //   최근 내역    ┌ (↑) 오이안            +5P ┐   줄마다 카드 한 장 — 이름 · 분류·사유 · 몇 분 전
-//                └     출석 · 3분 전          ┘   위에서 PAGE_RECENT_N 줄
+//                └     출석 · 3분 전          ┘   PAGE_RECENT_N 줄 — 넷이 넘으면 천천히 아래로 굴린다
 //   오늘 출석    [(사람) 12명 출석]               이름 알약 세 칸씩, 넘치면 마지막 칸이 '외 N명'
 //                [오이안][김하늘][박서준] …
 //   출석 랭킹    (1) 오이안                 8회   이번 달 출석 많은 순 위에서 PAGE_RANK_N 줄
@@ -18,7 +18,9 @@
 // · 위 띠의 점은 몇째 장인가다 — 홈이 첫째.
 // · 원 아래로 갈수록 좁다 — 줄은 y 60..190 안에 두고 폭은 188 로 맞췄다(맨 아래 줄 모서리도 원 안).
 
-#define PAGE_RECENT_N 4  // 최근 내역 줄 수 — 두 줄짜리 카드 넷이 원 안에 든다
+// 최근 내역 줄 수. 원 안에는 두 줄짜리 카드 넷이 든다 — 그보다 많으면 위에서 잠깐 멈췄다가
+// 천천히 아래로 굴리고, 끝에서 잠깐 멈춘 뒤 다음 장으로 넘어간다(아래 '최근 내역 굴리기').
+#define PAGE_RECENT_N 15
 #define PAGE_TODAY_N 12  // 오늘 출석 이름 칸 수(3 × 4). 넘치면 마지막 칸이 '외 N명'
 #define PAGE_RANK_N 5    // 순위 줄 수
 #define PAGE_NAME_LEN 32
@@ -138,52 +140,155 @@ static void pageRowCard(int y, int h, uint16_t fill, uint16_t edge) {
 }
 
 // ── 최근 내역 ─────────────────────────────────────────────────────
+#define PAGE_RECENT_H 30     // 줄 카드 높이
+#define PAGE_RECENT_STEP 33  // 줄 간격
+// 줄이 보이는 칸 — 위 띠의 타원(y 54 까지) 아래부터 아래 띠의 타원(y 190 부터) 위까지.
+// 굴릴 때 이 칸만 다시 그려 패널로 보낸다(위아래 띠는 그대로 둔다).
+#define PAGE_VIEW_TOP PAGE_TOP_Y
+#define PAGE_VIEW_BOT (HOME_FOOT_Y - 8)
+#define PAGE_VIEW_H (PAGE_VIEW_BOT - PAGE_VIEW_TOP)
+
+// 줄 하나를 y(위 끝)에 그린다. passed = 받은 뒤 흐른 초('몇 분 전' 에 더한다).
+static void pageRecentRow(const PageRecent &r, int y, uint32_t passed) {
+  const int h = PAGE_RECENT_H, cy = y + h / 2;
+  const bool earn = r.delta >= 0;
+  pageRowCard(y, h, HOME_CARD, HOME_LINE);
+
+  // 왼쪽 동그라미 — 홈의 '오늘' 줄과 같은 화살표(지급 ↑ 주황 · 사용 ↓ 빨강)
+  const int bx = PAGE_ROW_X + 16;
+  gfx->fillCircle(bx, cy, 10, earn ? HOME_ORANGE_SOFT : PAGE_SPEND_SOFT);
+  homeArrow(bx, cy, earn, earn ? HOME_ORANGE : HOME_RED);
+
+  // 오른쪽 '+5P' · '-3P'
+  char val[20], num[16];
+  commafy(earn ? r.delta : -r.delta, num, sizeof(num));
+  snprintf(val, sizeof(val), "%s%sP", earn ? "+" : "-", num);
+  const int valW = homeTextW(val, HOME_FONT_M) + 1;
+  const int right = PAGE_ROW_X + PAGE_ROW_W - 8;
+  homeTextL(val, right - valW, cy, earn ? HOME_GREEN : HOME_RED, HOME_FONT_M, true);
+
+  // 가운데 두 줄 — 이름 / '분류 · 사유 · 3분 전'(길면 사유를 자르고 시각은 남긴다)
+  const int tx = bx + 16, room = right - valW - 6 - tx;
+  char nm[PAGE_NAME_LEN + 4];
+  strlcpy(nm, r.name[0] ? r.name : "(이름 없음)", sizeof(nm));
+  pageFit(nm, sizeof(nm), room, HOME_FONT_S);
+  homeTextL(nm, tx, cy - 7, HOME_BROWN, HOME_FONT_S, true);
+
+  char ago[16], why[sizeof(r.why) + 4], sub[sizeof(why) + 24];
+  pageAgo(r.agoSec + passed, ago, sizeof(ago));
+  strlcpy(why, r.why[0] ? r.why : (earn ? "지급" : "사용"), sizeof(why));
+  // 넘치면 사유를 떼고 분류만('특별 미션') — 그래도 넘치면 뒤를 자른다
+  const int whyRoom = room - homeTextW(ago, PAGE_FONT_XS) - PAGE_DOT_W;
+  if (pageTextDots(why, 0, 0, 0, PAGE_FONT_XS, false) > whyRoom) {
+    char *dot = strstr(why, PAGE_MIDDOT);
+    if (dot) {
+      while (dot > why && dot[-1] == ' ') dot--;
+      *dot = '\0';
+    }
+    pageFit(why, sizeof(why), whyRoom, PAGE_FONT_XS);
+  }
+  snprintf(sub, sizeof(sub), "%s " PAGE_MIDDOT " %s", why, ago);
+  pageTextDots(sub, tx, cy + 7, HOME_GREY, PAGE_FONT_XS);
+}
+
+// ── 최근 내역 굴리기 ─────────────────────────────────────────────
+// 줄이 넷을 넘으면 원 안에 다 들지 않아 천천히 아래로 굴린다. 프레임마다 글자를 다시 그리면
+// 한글(U8g2) 열다섯 줄에 수십 ms 가 든다 — 그래서 **목록 전체를 긴 그림판(PSRAM)에 한 번만**
+// 그려 두고, 프레임마다 보이는 창만 화면 버퍼로 옮긴 뒤 그 칸(y 60..190)만 패널로 보낸다.
+//   · 그림판은 비침색(TRANSPARENT_KEY)으로 채운 뒤 줄을 그린다. 옮길 때 비침색은 건너뛰어 줄
+//     사이·카드 모서리 밖에는 바탕(크림 · 점 무늬)이 그대로 보인다. 바탕은 굴러가지 않는다.
+//   · 바탕은 장을 통째로 그릴 때(pageDraw) 줄을 깔기 **전에** 그 칸을 떠 둔다(recentBack).
+//   · 그림판은 내용이 바뀌거나 '몇 분 전' 의 분이 바뀔 때만 다시 그린다(recentBoardSig).
+// 언제 멈추고 언제 굴리나 · 그동안 서버 받기를 쉬는 것은 main.cpp(recentScroll*)가 정한다.
+static Arduino_Canvas *recentBoard = nullptr;  // 240 × (PAGE_RECENT_N × 33) — PSRAM 약 240KB
+static uint16_t *recentBack = nullptr;         // 보이는 칸의 바탕(240 × 130) — PSRAM 약 62KB
+static uint32_t recentBoardSig = 0;
+static bool recentBoardFailed = false;  // 못 잡았다 — 예전처럼 위 네 줄만 그린다
+static int recentOff = 0;               // 지금 굴린 만큼(px) — main.cpp 가 정한다
+
+static int recentRows() { return pagesData.recentN < PAGE_RECENT_N ? pagesData.recentN : PAGE_RECENT_N; }
+static int recentContentH() {
+  const int n = recentRows();
+  return n ? n * PAGE_RECENT_STEP - (PAGE_RECENT_STEP - PAGE_RECENT_H) : 0;
+}
+// 굴릴 수 있는 길이 — 0 이면 다 들어간다(굴리지 않는다)
+static int recentScrollMax() {
+  if (recentBoardFailed) return 0;
+  const int m = recentContentH() - PAGE_VIEW_H;
+  return m > 0 ? m : 0;
+}
+
+// 그림판을 지금 내용으로. 그릴 것이 바뀌지 않았으면 그냥 돌아간다. 못 잡으면 false.
+static bool recentBoardEnsure(uint32_t passed) {
+  if (recentBoardFailed) return false;
+  if (!recentBoard) {
+    recentBoard = new Arduino_Canvas(240, PAGE_RECENT_N * PAGE_RECENT_STEP, nullptr);
+    if (!recentBoard || !recentBoard->begin(GFX_SKIP_OUTPUT_BEGIN)) {
+      delete recentBoard;
+      recentBoard = nullptr;
+      recentBoardFailed = true;
+      Serial.println("[최근내역] 그림판을 못 잡았다 — 굴리지 않고 위 네 줄만 띄운다");
+      return false;
+    }
+  }
+  uint32_t sig = 2166136261u;
+  auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
+  mix((uint32_t)recentRows());
+  const uint8_t *b = (const uint8_t *)pagesData.recent;
+  for (size_t i = 0; i < sizeof(pagesData.recent); i++) mix(b[i]);
+  mix(passed / 60);
+  if (sig == recentBoardSig) return true;
+  recentBoardSig = sig;
+
+  const uint32_t t0 = micros();
+  Arduino_Canvas *screen = gfx;  // 줄 그리는 함수들은 gfx 에 그린다 — 잠깐 그림판으로 돌린다
+  gfx = recentBoard;
+  gfx->fillRect(0, 0, 240, recentContentH() + 1, TRANSPARENT_KEY);
+  for (int i = 0; i < recentRows(); i++) pageRecentRow(pagesData.recent[i], i * PAGE_RECENT_STEP, passed);
+  gfx = screen;
+  Serial.printf("[최근내역] 그림판 %d줄 다시 그림 (%lums)\n", recentRows(),
+                (unsigned long)((micros() - t0 + 500) / 1000));
+  return true;
+}
+
+// 보이는 칸을 화면 버퍼에 다시 깐다 — 바탕을 되돌리고, 그림판의 off 줄부터 비침색만 빼고 얹는다.
+// 줄 카드가 있는 가로 폭(PAGE_ROW_X ~)만 만진다 — 그 밖은 바탕 그대로다.
+static void recentCompose(int off) {
+  uint16_t *fb = gfx->getFramebuffer();
+  const uint16_t *board = recentBoard->getFramebuffer();
+  if (!fb || !board || !recentBack) return;
+  const int x0 = PAGE_ROW_X, x1 = PAGE_ROW_X + PAGE_ROW_W, ch = recentContentH();
+  for (int y = 0; y < PAGE_VIEW_H; y++) {
+    uint16_t *dst = fb + (PAGE_VIEW_TOP + y) * 240;
+    memcpy(dst + x0, recentBack + y * 240 + x0, (x1 - x0) * 2);
+    const int by = y + off;
+    if (by >= ch) continue;
+    const uint16_t *src = board + by * 240;
+    for (int x = x0; x < x1; x++)
+      if (src[x] != TRANSPARENT_KEY) dst[x] = src[x];
+  }
+}
+
 static void pageRecent() {
   const PagesData &d = pagesData;
   if (!d.recentN) return pageEmpty("아직 기록이 없어요");
   const uint32_t passed = (millis() - pagesRecentAt) / 1000;
-  const int h = 30, step = 33;
-  for (int i = 0; i < d.recentN && i < PAGE_RECENT_N; i++) {
-    const PageRecent &r = d.recent[i];
-    const int y = PAGE_TOP_Y + i * step, cy = y + h / 2;
-    const bool earn = r.delta >= 0;
-    pageRowCard(y, h, HOME_CARD, HOME_LINE);
-
-    // 왼쪽 동그라미 — 홈의 '오늘' 줄과 같은 화살표(지급 ↑ 주황 · 사용 ↓ 빨강)
-    const int bx = PAGE_ROW_X + 16;
-    gfx->fillCircle(bx, cy, 10, earn ? HOME_ORANGE_SOFT : PAGE_SPEND_SOFT);
-    homeArrow(bx, cy, earn, earn ? HOME_ORANGE : HOME_RED);
-
-    // 오른쪽 '+5P' · '-3P'
-    char val[20], num[16];
-    commafy(earn ? r.delta : -r.delta, num, sizeof(num));
-    snprintf(val, sizeof(val), "%s%sP", earn ? "+" : "-", num);
-    const int valW = homeTextW(val, HOME_FONT_M) + 1;
-    const int right = PAGE_ROW_X + PAGE_ROW_W - 8;
-    homeTextL(val, right - valW, cy, earn ? HOME_GREEN : HOME_RED, HOME_FONT_M, true);
-
-    // 가운데 두 줄 — 이름 / '분류 · 사유 · 3분 전'(길면 사유를 자르고 시각은 남긴다)
-    const int tx = bx + 16, room = right - valW - 6 - tx;
-    char nm[PAGE_NAME_LEN + 4];
-    strlcpy(nm, r.name[0] ? r.name : "(이름 없음)", sizeof(nm));
-    pageFit(nm, sizeof(nm), room, HOME_FONT_S);
-    homeTextL(nm, tx, cy - 7, HOME_BROWN, HOME_FONT_S, true);
-
-    char ago[16], why[sizeof(r.why) + 4], sub[sizeof(why) + 24];
-    pageAgo(r.agoSec + passed, ago, sizeof(ago));
-    strlcpy(why, r.why[0] ? r.why : (earn ? "지급" : "사용"), sizeof(why));
-    // 넘치면 사유를 떼고 분류만('특별 미션') — 그래도 넘치면 뒤를 자른다
-    const int whyRoom = room - homeTextW(ago, PAGE_FONT_XS) - PAGE_DOT_W;
-    if (pageTextDots(why, 0, 0, 0, PAGE_FONT_XS, false) > whyRoom) {
-      char *dot = strstr(why, PAGE_MIDDOT);
-      if (dot) {
-        while (dot > why && dot[-1] == ' ') dot--;
-        *dot = '\0';
-      }
-      pageFit(why, sizeof(why), whyRoom, PAGE_FONT_XS);
-    }
-    snprintf(sub, sizeof(sub), "%s " PAGE_MIDDOT " %s", why, ago);
-    pageTextDots(sub, tx, cy + 7, HOME_GREY, PAGE_FONT_XS);
+  // 줄을 깔기 전의 바탕을 떠 둔다 — 굴릴 때마다 이것으로 칸을 되돌린다
+  if (!recentBack && !recentBoardFailed)
+    recentBack = (uint16_t *)ps_malloc(240 * PAGE_VIEW_H * 2);
+  if (recentBack && recentBoardEnsure(passed)) {
+    memcpy(recentBack, gfx->getFramebuffer() + PAGE_VIEW_TOP * 240, 240 * PAGE_VIEW_H * 2);
+    const int m = recentScrollMax();
+    if (recentOff > m) recentOff = m;
+    recentCompose(recentOff);
+    return;
+  }
+  // 그림판을 못 잡았다 — 예전처럼 원 안에 드는 줄만 바로 그린다
+  recentBoardFailed = true;
+  for (int i = 0; i < recentRows(); i++) {
+    const int y = PAGE_TOP_Y + i * PAGE_RECENT_STEP;
+    if (y + PAGE_RECENT_H > PAGE_VIEW_BOT) break;
+    pageRecentRow(d.recent[i], y, passed);
   }
 }
 

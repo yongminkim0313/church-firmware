@@ -208,6 +208,11 @@
 #define PAGES_ENABLE 1
 #define PAGE_HOME_MS 10000UL  // 홈을 띄워 두는 시간
 #define PAGE_MS 6000UL        // 나머지 장 하나를 띄워 두는 시간
+// 최근 내역이 원 안에 다 안 들면(넷 넘게) 천천히 아래로 굴린다 — 위에서 HOLD 만큼 멈췄다가
+// 초당 PX_S 픽셀로 끝까지, 끝에서 HOLD 만큼 멈춘 뒤 다음 장. 그동안 서버 받기는 쉰다.
+// 열다섯 줄이면 굴릴 길이가 362px — 20 이면 18초 남짓 걸린다.
+#define PAGE_SCROLL_PX_S 20
+#define PAGE_SCROLL_HOLD_MS 2500UL
 // 알림판(최근 내역 · 오늘 출석 · 순위)을 다시 받는 주기. 포인트가 바뀌면 홈 숫자와 함께
 // 주기를 기다리지 않고 받는다.
 #define BOARD_TTL_MS 60000UL  // 1분
