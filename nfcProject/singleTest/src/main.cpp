@@ -3,14 +3,17 @@
 // 화면이 동그라미라 원 안에 통째로 드는 칸에만, 가운데부터 바깥쪽으로 놓는다.
 // ★ 데이터는 **화면이 검은 동안에만** 받는다 — 켤 때, 그리고 대기 화면이 한 바퀴 돌 때마다.
 //   이름표·사진·알림판을 다 받으면 홈부터 그린다. 와이파이는 붙인 채 둔다(2026-11-04).
+//   받는 동안 검은 화면에는 도는 점 고리와 '사진 받는 중' 같은 한 줄만 둔다(drawLoading — 아주 조금만 쓴다).
 //   (예전엔 끄고 그렸다 — 켜 두면 받는 순간이 아니어도 화면이 위로 10px 쯤 밀려 자글거렸다, 2026-11-03.)
 //   서버(/ws/device)에는 붙지 않는다 — 사진·포인트가 바뀌면 다음 바퀴에 반영된다.
 // 와이파이는 폰으로 넣을 수 있다 — 설정 모드(portal.h)에서 화면의 QR 을 찍어 붙으면 설정 페이지가
 // 뜬다. 들어가는 길: 켜고 10초 안에 BOOT 단추 1초 · 아는 와이파이가 안 보일 때 저절로 · 시리얼 'w'.
 // 알림 화면(이름 옆에 그 아이 사진(48) · 그 아래 지급/사용 · 몇 포인트)과 일괄 명단 화면은
 // 시리얼 't' · 'b' 로만 띄워 본다.
-// 대기 화면은 6초마다 넘어간다 — 홈(바둑판) → 오늘 출석 → 포인트 순위 → 이번 달 출석 많은 순 → 홈.
-// 세 장의 자료는 서버의 GET /api/talent/signage 한 번으로 받는다 — 켤 때, 화면이 아직 검을 때.
+// 대기 화면은 6초마다 넘어간다 — 홈(바둑판) → 최근 내역 5건 → 오늘 출석 → 포인트 순위 → 이번 달 출석 많은 순 → 홈.
+// 오늘 출석이 아무도 없으면 그 장은 건너뛴다.
+// 뒤의 세 장은 서버의 GET /api/talent/signage 한 번으로, 최근 내역은 GET /api/talent/feed?limit=5 로
+// 받는다 — 둘 다 화면이 검을 때(켤 때 · 한 바퀴 돈 뒤).
 // 화면 켜는 순서와 객체 설정은 nfcSingle(../single/src/main.cpp)에서 그대로 가져왔다:
 //   1) XL9535 확장칩  2) RGB 패널  3) 초기화 표(st7701_hl021_init.h)  4) 백라이트(GPIO46)
 #include <Arduino.h>
@@ -80,6 +83,10 @@
 #define PAGE_MS          6000           // 한 장을 이만큼 띄우고 다음 장으로
 #define BOARD_TODAY_MAX  64             // 오늘 출석은 사진만 깐다 — 칸이 모자라면 남은 아이는 빠진다
 #define BOARD_RANK_ROWS  20             // 순위는 위에서 스무 줄 — 표로 그려 위에서 아래로 굴린다
+#define RECENT_N         5              // 최근 내역 줄 수 — 원 안에 굴리지 않고 한 번에 든다
+#define RECENT_ROW_H     60             // 한 줄 높이(사진 48 + 틈) — 다섯 줄이 y=104..404
+#define RECENT_TOP       104
+#define RECENT_W         340            // 표 너비 — 맨 아래 줄(y=404)에서도 원 안에 든다
 
 // 순위 표 — 원에 맞추지 않은 네모 표. 표 전체를 화면 밖 캔버스(PSRAM)에 한 번 그려 두고,
 // 가운데 창(WIN)에 보이는 만큼만 옮겨 그리며 천천히 굴린다.
@@ -153,6 +160,8 @@ static volatile bool swapReady = false;
 // 알림판 — 오늘 출석 · 포인트 순위 · 이번 달 출석. 일꾼이 boardNext 를 채우고 boardReady 를
 // 세우면 loop 가 boardShown 으로 옮긴다. 사진은 싣지 않고 img 이름만 — 이미 받아 둔 48 을 쓴다.
 struct BoardRow { char name[32]; char img[IMG_MAX]; int rank; int value; };
+// 최근 내역 한 줄 — 서버는 sid 만 주므로 img 는 이름표(rows)에서 찾아 적는다.
+struct RecentRow { char name[32]; char img[IMG_MAX]; int delta; char why[64]; uint32_t agoSec; };
 struct Board {
   bool ok;                                  // 한 번이라도 받았다
   int  todayN, pointsN, monthN;
@@ -160,6 +169,10 @@ struct Board {
   BoardRow points[BOARD_RANK_ROWS];
   BoardRow month[BOARD_RANK_ROWS];
   int  mon;                                 // 몇 월인가(제목에 쓴다)
+  bool recentOk;                            // 최근 내역을 받았다 — 못 받으면 그 장을 건너뛴다
+  int  recentN;
+  RecentRow recent[RECENT_N];
+  uint32_t recentAt;                        // 받은 때(millis) — '몇 분 전' 에 이만큼 더한다
 };
 static Board &boardNext = psram<Board>(), &boardShown = psram<Board>();
 static volatile bool boardReady  = false;
@@ -169,6 +182,8 @@ static volatile bool boardReady  = false;
 // 여전히 밀려 보였다(2026-11-03). 그래서 화면이 검은 동안 다 받고 끈다.
 static volatile bool netDone = false;
 static volatile bool netWant = false;       // loop → 일꾼: 한 바퀴 돌았다, 다시 받아라
+// 지금 무엇을 받고 있나 — 일꾼이 적고, loop 가 받는 중 화면의 글 한 줄로 그린다.
+static const char *volatile loadMsg = "와이파이 연결 중";
 
 // 알림 한 장. 일꾼이 마련해 cardReady 를 세우면 loop 가 그리고 내린다.
 struct Card {
@@ -495,6 +510,40 @@ static void prepareCard() {
                 c.hasPhoto ? "있음" : (r ? "받아 둔 것에 없음" : "이름표에 없음"));
 }
 
+// 최근 내역 다섯 건을 b 에 채운다. 못 받으면 false(그 장을 건너뛴다).
+// 사진은 이름표에서 학번으로 찾는다 — 내역에는 img 가 없다. 이름표는 바로 앞(refreshPhotos)에 받았다.
+static bool fetchRecent(Board &b) {
+  char url[96];
+  snprintf(url, sizeof(url), "%s/api/talent/feed?limit=%d", TALENT_SERVER, RECENT_N);
+  http.begin(scli, url);
+  http.addHeader("x-talent-key", TALENT_DEVICE_KEY);
+  const int code = http.GET();
+  if (code != HTTP_CODE_OK) { http.end(); Serial.printf("[최근] 실패 code=%d\n", code); return false; }
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+  if (err) { Serial.printf("[최근] 해석 실패: %s\n", err.c_str()); return false; }
+
+  int n = 0;
+  for (JsonObject r : doc["data"].as<JsonArray>()) {
+    if (n >= RECENT_N) break;
+    RecentRow &w = b.recent[n++];
+    strlcpy(w.name, r["name"] | "", sizeof(w.name));
+    w.delta  = r["delta"] | 0;
+    w.agoSec = r["agoSec"] | 0;
+    const char *cat = r["category"] | "", *why = r["reason"] | "";
+    snprintf(w.why, sizeof(w.why), "%s%s%s", cat, (cat[0] && why[0]) ? " · " : "", why);
+    const char *sid = r["sid"] | "";
+    w.img[0] = '\0';
+    for (int i = 0; sid[0] && i < rowCount; i++)
+      if (!strcmp(rows[i].sid, sid)) { strlcpy(w.img, rows[i].img, sizeof(w.img)); break; }
+  }
+  b.recentN  = n;
+  b.recentAt = millis();
+  Serial.printf("[최근] %d건\n", n);
+  return true;
+}
+
 // 알림판을 받아 loop 에 건넨다. 켤 때 한 번, 화면이 아직 검을 때 부른다. 받으면 true.
 static bool fetchBoard() {
   char url[96];
@@ -529,6 +578,7 @@ static bool fetchBoard() {
   b.monthN  = fill(doc["month"].as<JsonArray>(),  b.month,  BOARD_RANK_ROWS, "count");
   const char *date = doc["date"] | "";                  // 'YYYY-MM-DD'
   b.mon = strlen(date) >= 7 ? atoi(date + 5) : 0;
+  b.recentOk = fetchRecent(b);
   b.ok = true;
   boardReady = true;
   Serial.printf("[알림판] 오늘 %d명 · 포인트 %d줄 · %d월 출석 %d줄\n", b.todayN, b.pointsN, b.mon, b.monthN);
@@ -549,22 +599,28 @@ static void fetchSettle() {
 
 // 한 바퀴 돈 뒤 다시 받기 — 이미 들고 있는 사진은 받지 않고(refreshPhotos), 바뀐 것만 받는다.
 // 와이파이가 그사이 끊겼으면 다시 붙어 본다.
+static volatile uint32_t lastFetchMs = 0;   // 마지막 다시 받기에 걸린 시간 — 메모리 줄에 함께 찍는다
+
 static void refreshCycle() {
   const uint32_t t0 = millis();
   fsOk = LittleFS.begin(false) && LittleFS.exists("/p");
   bool up = WiFi.status() == WL_CONNECTED;
   for (int i = 0; i < REFRESH_JOIN_TRIES && !up; i++) {
+    loadMsg = "와이파이 연결 중";
     Serial.println("[와이파이] 끊겨 있다 — 다시 붙는다");
     if (!(up = wifiJoin())) vTaskDelay(pdMS_TO_TICKS(1000));
   }
   if (up) {
+    loadMsg = "사진 받는 중";
     if (!refreshPhotos()) Serial.println("[목록] 못 받았다 — 들고 있던 것으로 한 바퀴 더");
+    loadMsg = "내역 받는 중";
     for (int i = 0; i < BOARD_TRIES && !fetchBoard(); i++) vTaskDelay(pdMS_TO_TICKS(1000));
   } else {
     Serial.println("[와이파이] 못 붙었다 — 들고 있던 것으로 한 바퀴 더");
   }
   fetchSettle();
-  Serial.printf("[다시 받기] %lums\n", (unsigned long)(millis() - t0));
+  lastFetchMs = millis() - t0;
+  Serial.printf("[다시 받기] %lums\n", (unsigned long)lastFetchMs);
 }
 
 static void fetchTask(void *) {
@@ -600,16 +656,18 @@ static void fetchTask(void *) {
 
   // 켤 때 — 이름표·사진, 그다음 알림판. 그동안 화면은 검다(loop 는 netDone 을 기다린다).
   // 이름표는 받을 때까지 다시 해 본다(보여 줄 것이 없다).
+  loadMsg = "사진 받는 중";
   while (!refreshPhotos()) {
     Serial.println("[목록] 못 받았다 — 잠시 뒤 다시");
     vTaskDelay(pdMS_TO_TICKS(FETCH_RETRY_MS));
   }
+  loadMsg = "내역 받는 중";
   for (int i = 0; i < BOARD_TRIES && !fetchBoard(); i++) vTaskDelay(pdMS_TO_TICKS(1000));
   fetchSettle();
   netDone = true;
 
   for (;;) {
-    // 한 바퀴(홈 → 오늘 → 포인트 → 이번 달)를 다 돌면 loop 가 netWant 를 세운다 — 다시 붙어 받고 끈다.
+    // 한 바퀴(홈 → 최근 → 오늘 → 포인트 → 이번 달)를 다 돌면 loop 가 netWant 를 세운다 — 다시 붙어 받고 끈다.
     // 그동안 loop 는 마지막 장을 그대로 둔 채 아무것도 그리지 않는다. 못 붙거나 못 받으면 들고 있던
     // 것으로 한 바퀴 더 돈다(켤 때와 달리 붙을 때까지 매달리지 않는다).
     if (netWant) {
@@ -887,6 +945,61 @@ static void drawTodayPage(const Board &b) {
   }
 }
 
+// '몇 분 전' — 서버가 센 경과 초에 받은 뒤 흐른 시간을 더한다(기기에 시계가 없다).
+static void agoText(uint32_t sec, char *out, size_t cap) {
+  if (sec < 60)         snprintf(out, cap, "방금");
+  else if (sec < 3600)  snprintf(out, cap, "%lu분 전", (unsigned long)(sec / 60));
+  else if (sec < 86400) snprintf(out, cap, "%lu시간 전", (unsigned long)(sec / 3600));
+  else                  snprintf(out, cap, "%lu일 전", (unsigned long)(sec / 86400));
+}
+
+// 최근 내역 — 줄마다 [사진] 이름 ······ +5P, 이름 아래에 '분류 · 사유 · 3분 전'. 다섯 줄이 원 안에 든다.
+static void drawRecentPage(const Board &b) {
+  clearPaced();
+  drawTitle("최근 내역");
+  if (!b.recentN) {
+    const char *msg = "아직 기록이 없어요";
+    drawTextAt(msg, 240 - textWidth(msg, 2) / 2, 260, 2, COL_DIM);
+    return;
+  }
+  const uint32_t passed = (millis() - b.recentAt) / 1000;
+  const int x0 = 240 - RECENT_W / 2, x1 = 240 + RECENT_W / 2;
+  for (int i = 0; i < b.recentN; i++) {
+    const RecentRow &r = b.recent[i];
+    const int y = RECENT_TOP + i * RECENT_ROW_H, cy = y + RECENT_ROW_H / 2;
+    if (i % 2) gfx->fillRect(x0, y, RECENT_W, RECENT_ROW_H, COL_ZEBRA);
+    const uint16_t *px = photoOf(r.img);
+    if (px) gfx->draw16bitRGBBitmap(x0 + 4, y + (RECENT_ROW_H - PHOTO_PX) / 2, (uint16_t *)px, PHOTO_PX, PHOTO_PX);
+
+    char val[16];
+    snprintf(val, sizeof(val), "%+dP", r.delta);
+    const int valW = textWidth(val, 2);
+    drawTextAt(val, x1 - 8 - valW, cy, 2, r.delta >= 0 ? COL_GIVE : COL_USE);
+
+    const int tx = x0 + 4 + PHOTO_PX + 10, room = x1 - 8 - valW - 10 - tx;
+    char nm[sizeof(r.name) + 4];
+    strlcpy(nm, r.name[0] ? r.name : "(이름 없음)", sizeof(nm));
+    const int sc = fitText(nm, sizeof(nm), room);
+    drawTextAt(nm, tx, cy - 9, sc, COL_TEXT);
+
+    // 아랫줄 '분류 · 사유 · 3분 전' — 길면 사유 뒤를 잘라 '..' (시각은 늘 남긴다)
+    char ago[16], why[sizeof(r.why) + 4], sub[sizeof(why) + 24];
+    agoText(r.agoSec + passed, ago, sizeof(ago));
+    strlcpy(why, r.why, sizeof(why));
+    for (;;) {
+      snprintf(sub, sizeof(sub), "%s%s%s", why, why[0] ? " · " : "", ago);
+      if (textWidth(sub, 1) <= room || !why[0]) break;
+      size_t n = strlen(why);
+      if (n >= 2 && !strcmp(why + n - 2, "..")) n -= 2;
+      if (n) do { n--; } while (n && (why[n] & 0xC0) == 0x80);
+      why[n] = '\0';
+      if (n) strlcat(why, "..", sizeof(why));
+    }
+    drawTextAt(sub, tx, cy + 16, 1, COL_DIM);
+    delay(1);                                              // 나눠 그리기 — 위 머리말
+  }
+}
+
 // ── 순위 표 ───────────────────────────────────────────────────────
 static Arduino_Canvas *rankCanvas = nullptr;   // TABLE_W × (스무 줄) — 처음 쓸 때 PSRAM 에 잡는다
 static int rankContentH = 0;                   // 이번 표의 실제 높이(줄 수 × ROW_H)
@@ -976,6 +1089,42 @@ static void drawRankPage(const char *title, const BoardRow *rows, int n, const c
   blitRank(0);
 }
 
+// ── 받는 중 화면 ───────────────────────────────────────────────────
+// 검은 화면 가운데에 점 여덟 개가 도는 고리, 그 아래에 무엇을 받는 중인지 한 줄.
+// ★ 받는 동안 그리므로 **아주 조금만** 쓴다 — 한 걸음에 작은 점 여덟 개(합쳐 1KB 남짓).
+//   화면 전체를 다시 쓰면 받기와 겹쳐 밀린다(위 '나눠 그리기'). 바탕이 검어 조금 밀려도 점만 움직인다.
+//   다 받으면 홈이 화면을 통째로 다시 쓰므로 따로 지우지 않는다.
+#define LOAD_CY        220
+#define LOAD_R         26               // 고리 반지름
+#define LOAD_DOT       5                // 점 반지름
+#define LOAD_DOTS      8
+#define LOAD_STEP_MS   110
+#define LOAD_MSG_CY    290
+
+static void drawLoading(bool fresh) {
+  static int head = 0;
+  static uint32_t at = 0;
+  static const char *msgShown = nullptr;
+  const uint32_t now = millis();
+  if (fresh) { msgShown = nullptr; at = 0; }
+  const char *msg = loadMsg;
+  if (msg != msgShown) {                     // 글이 바뀌었을 때만 그 줄을 지우고 다시 쓴다
+    gfx->fillRect(80, LOAD_MSG_CY - 18, 320, 36, COL_BG);
+    drawTextAt(msg, 240 - textWidth(msg, 2) / 2, LOAD_MSG_CY, 2, COL_DIM);
+    msgShown = msg;
+  }
+  if (at && now - at < LOAD_STEP_MS) return;
+  at = now;
+  head = (head + 1) % LOAD_DOTS;
+  for (int i = 0; i < LOAD_DOTS; i++) {
+    const float a = 2 * PI * i / LOAD_DOTS - PI / 2;      // 12시부터 시계 방향
+    const int x = 240 + (int)lroundf(LOAD_R * cosf(a)), y = LOAD_CY + (int)lroundf(LOAD_R * sinf(a));
+    const int back = (head - i + LOAD_DOTS) % LOAD_DOTS;  // 머리에서 몇 칸 뒤인가 — 뒤일수록 어둡다
+    static const uint16_t SHADE[LOAD_DOTS] = { 0xFFFF, 0xC618, 0x8410, 0x528A, 0x3186, 0x2104, 0x2104, 0x2104 };
+    gfx->fillCircle(x, y, LOAD_DOT, SHADE[back]);
+  }
+}
+
 // ── 설정 모드 화면 ─────────────────────────────────────────────────
 // QR 을 그린다. 바깥에 흰 여백(quiet zone) 네 조각을 꼭 둔다 — 없으면 카메라가 못 읽는다.
 // 글자 수에 맞는 가장 작은 판을 고른다(작을수록 조각이 커서 멀리서도 읽힌다).
@@ -1032,6 +1181,12 @@ static void drawPortal() {
 }
 
 void setup() {
+  // 시리얼(보드의 USB Serial/JTAG)이 기다리지 않게 한다. 선이 꽂혀 있는데 모니터가 닫혀 있으면
+  // 보드는 '붙어 있다'고 보고, 버퍼가 차면 printf 한 번에 100ms × 20번 = 2초까지 기다린다
+  // (HWCDC::write). 받는 중의 로그 몇 줄 때문에 다시 받기가 3.6초에서 7초로 늘었다(2026-11-04).
+  // 버퍼를 넉넉히 두고, 차면 기다리지 않고 버린다 — 모니터가 열려 있으면 바로 빠지니 버릴 일이 없다.
+  Serial.setTxBufferSize(4096);
+  Serial.setTxTimeoutMs(0);
   Serial.begin(115200);
   Serial.println("\n=== singleTest — 사진 바둑판 ===");
 
@@ -1054,7 +1209,7 @@ void setup() {
   xTaskCreatePinnedToCore(fetchTask, "fetch", 16384, nullptr, 1, nullptr, 0);   // https 와 wss 를 함께 든다
 }
 
-enum Page { PAGE_HOME, PAGE_TODAY, PAGE_POINTS, PAGE_MONTH, PAGE_COUNT };
+enum Page { PAGE_HOME, PAGE_RECENT, PAGE_TODAY, PAGE_POINTS, PAGE_MONTH, PAGE_COUNT };
 
 static void showHome() {
   drawGrid(shownCount);                     // 지우기도 함께 한다
@@ -1065,6 +1220,7 @@ static void showPage(Page p) {
   char title[32];
   switch (p) {
     case PAGE_HOME:   showHome(); break;
+    case PAGE_RECENT: drawRecentPage(b); break;
     case PAGE_TODAY:  drawTodayPage(b); break;
     case PAGE_POINTS: drawRankPage("포인트 순위", b.points, b.pointsN, "P", "포인트", COL_GIVE); break;
     case PAGE_MONTH:
@@ -1081,12 +1237,13 @@ static void logHeap(uint32_t now) {
   static uint32_t at = 0;
   if (at && now - at < 10000) return;
   at = now;
-  Serial.printf("[메모리] 내부 남음 %u · 최저 %u · 큰덩이 %u | PSRAM 남음 %u · 큰덩이 %u\n",
+  // 끝의 '받기' — 마지막 다시 받기에 걸린 ms. 모니터를 닫아 둔 동안의 값을 다시 열어 보려고 함께 찍는다.
+  Serial.printf("[메모리] 내부 남음 %u · 최저 %u · 큰덩이 %u | PSRAM 남음 %u · 큰덩이 %u | 받기 %lums\n",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM), (unsigned long)lastFetchMs);
 }
 
 void loop() {
@@ -1102,7 +1259,8 @@ void loop() {
   static uint32_t cardAt  = 0;
   static Page     page    = PAGE_HOME;
   static uint32_t pageAt  = 0;
-  static bool     waitNet = true;           // 받는 중 — 화면은 검은 채로 두고, 다 받고 와이파이를 끄면 홈부터
+  static bool     waitNet = true;           // 받는 중 — 검은 화면에 받는 중 표시만 두고, 다 받으면 홈부터
+  static bool     loadFresh = true;         // 받는 중 화면을 막 시작했다 — 글 줄을 새로 쓴다
   static uint32_t netAt   = 0;              // 마지막으로 다 받은 때
   const uint32_t now = millis();
 
@@ -1120,8 +1278,13 @@ void loop() {
   }
 
   if (waitNet) {
-    if (!netDone) return;                   // 아직 받는 중 — 화면은 검은 채로 둔다
+    if (!netDone) {                         // 아직 받는 중 — 고리만 돌린다
+      drawLoading(loadFresh);
+      loadFresh = false;
+      return;
+    }
     waitNet = false;
+    loadFresh = true;
     netAt = now;
     page = PAGE_HOME;
     pageAt = now;
@@ -1165,7 +1328,12 @@ void loop() {
   }
   if (now - pageAt < (ranking ? rankPageMs() : PAGE_MS)) return;
   // 알림판을 못 받았으면 홈에 머문다.
-  const Page next = boardShown.ok ? (Page)((page + 1) % PAGE_COUNT) : PAGE_HOME;
+  // 건너뛰는 장 — 최근 내역을 못 받았을 때, 오늘 출석이 아무도 없을 때. 홈은 건너뛰지 않는다.
+  auto skip = [](Page p) {
+    return (p == PAGE_RECENT && !boardShown.recentOk) || (p == PAGE_TODAY && !boardShown.todayN);
+  };
+  Page next = boardShown.ok ? (Page)((page + 1) % PAGE_COUNT) : PAGE_HOME;
+  while (skip(next)) next = (Page)((next + 1) % PAGE_COUNT);
   pageAt = now;
   // 한 바퀴를 다 돌았다 — 화면을 검게 지우고 다시 받는다. 켤 때와 같은 차례다: 검은 화면에서
   // 다 받은 뒤 홈부터 그린다(받는 동안 그림이 있으면 밀려 보였다).
