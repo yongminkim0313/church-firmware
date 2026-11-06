@@ -35,7 +35,24 @@ if port:
     env.Replace(UPLOAD_PORT=port)
     print("[포트] T-RGB(%s) → %s" % (BOARD_SERIAL, port))
 else:
-    # 못 찾아도 멈추지 않는다 — PlatformIO 의 평소 자동 고르기로 넘긴다.
-    # 다만 다른 보드가 같이 꽂혀 있으면 그쪽에 구워질 수 있으니 눈에 띄게 알린다.
-    print("[포트] 시리얼 %s 인 보드를 못 찾았습니다. PlatformIO 가 알아서 고릅니다 —"
-          " 다른 ESP32-S3 가 같이 꽂혀 있으면 그쪽에 구워질 수 있습니다." % BOARD_SERIAL)
+    # ★ 못 찾으면 **업로드를 멈춘다** (2026-11-06).
+    #   예전에는 PlatformIO 의 자동 고르기로 넘겼는데, 이 보드가 안 꽂힌 채 다른 ESP32 하나만
+    #   꽂혀 있으면 그쪽을 잡아 **엉뚱한 보드의 펌웨어를 덮어썼다**(실제로 일어났다).
+    #   빌드(`pio run`)는 보드 없이도 되게 두고, 막는 것은 업로드 바로 앞뿐이다.
+    #   다른 보드에 굽고 싶으면 위 BOARD_SERIAL 을 그 보드의 SER= 값으로 바꾼다.
+    print("[포트] 시리얼 %s 인 보드를 못 찾았습니다 — 업로드는 하지 않습니다" % BOARD_SERIAL)
+
+    def _stop_upload(target, source, env):
+        from serial.tools import list_ports
+        print("\n[포트] 업로드를 멈춥니다 — 시리얼 %s 인 보드가 꽂혀 있지 않습니다." % BOARD_SERIAL)
+        seen = [p for p in list_ports.comports() if "SER=" in (p.hwid or "")]
+        if seen:
+            print("[포트] 지금 꽂혀 있는 것 (다른 보드다 — 여기에 굽지 않는다):")
+            for p in seen:
+                print("         %s  %s" % (p.device, p.hwid))
+        else:
+            print("[포트] 지금 꽂혀 있는 USB 보드가 없습니다.")
+        print("[포트] 이 보드를 꽂거나, 보드를 바꿨다면 find_port.py 의 BOARD_SERIAL 을 고치세요.\n")
+        env.Exit(1)
+
+    env.AddPreAction("upload", _stop_upload)
