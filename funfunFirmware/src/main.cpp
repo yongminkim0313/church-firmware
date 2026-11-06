@@ -986,62 +986,64 @@ static void sendState(int8_t only = -1) {
 }
 
 #if PAGES_ENABLE
-// ── 최근 내역 굴리기 — 때 (그리는 길은 pages.h '최근 내역 굴리기') ──────
-// 장에 들어오면 위에서 PAGE_SCROLL_HOLD_MS 멈춰 있다가, PAGE_SCROLL_PX_S 로 아래 끝까지 굴리고,
-// 끝에서 PAGE_SCROLL_HOLD_MS 멈춘 뒤 다음 장으로 간다. 줄이 넷 이하면 굴리지 않는다(PAGE_MS).
+// ── 목록 굴리기 — 때 (그리는 길은 pages.h '목록 굴리기') ───────────
+// 최근 내역 · 출석 랭킹 · 포인트 랭킹이 원 안에 다 안 들면, 장에 들어와 위에서 PAGE_SCROLL_HOLD_MS
+// 멈춰 있다가 PAGE_SCROLL_PX_S 로 아래 끝까지 굴리고, 끝에서 PAGE_SCROLL_HOLD_MS 멈춘 뒤 다음 장으로
+// 간다. 다 들어가면 굴리지 않는다(PAGE_MS).
 // ★ 굴리는 동안(위에서 멈춘 때부터 아래 끝에 닿을 때까지) **서버 받기를 쉰다** — 받기 한 번이
 //   0.3~1초 고리를 붙잡아 그동안 화면이 멈칫거린다. 아래 끝에서 멈춘 동안 · 다른 장에서 받는다.
 //   태깅은 그대로 받는다(아이를 세워 두지 않는다 — 태깅하면 이 장을 떠난다).
-static uint32_t recentAt0 = 0;  // 이 장에 들어온 때
+static uint32_t listAt0 = 0;  // 이 장에 들어온 때
 // 재기 — 한 번 굴릴 때마다 한 줄 찍는다(프레임 수 · 그리기+보내기 시간 · 프레임 사이 가장 긴 틈)
 static uint32_t scrollLastAt = 0, scrollFrames = 0, scrollUsSum = 0, scrollUsMax = 0, scrollGapMax = 0;
 static bool scrollReported = false;
 
-static uint32_t recentScrollMs() {
-  const int m = recentScrollMax();
+static uint32_t listScrollMs() {
+  const int m = listScrollMax(idlePage);
   return m ? (uint32_t)m * 1000UL / PAGE_SCROLL_PX_S : 0;
 }
-static uint32_t recentPageMs() {
-  const uint32_t s = recentScrollMs();
+static uint32_t listPageMs() {
+  const uint32_t s = listScrollMs();
   return s ? PAGE_SCROLL_HOLD_MS + s + PAGE_SCROLL_HOLD_MS : PAGE_MS;
 }
-static void recentScrollBegin() {
-  recentAt0 = millis();
-  recentOff = 0;
+static void listScrollBegin() {
+  listAt0 = millis();
+  listOff = 0;
   scrollLastAt = scrollFrames = scrollUsSum = scrollUsMax = scrollGapMax = 0;
   scrollReported = false;
 }
 // 받기를 쉬어야 하나 — 굴릴 장이고 아래 끝에 닿기 전이다(위에서 멈춰 있는 동안도 쉰다 —
 // 그때 시작한 받기가 굴리기 첫머리를 붙잡지 않게).
-static bool recentScrollQuiet() {
-  if (mode != MODE_IDLE || idlePage != PAGE_RECENT) return false;
-  const uint32_t s = recentScrollMs();
-  return s && millis() - recentAt0 < PAGE_SCROLL_HOLD_MS + s;
+static bool listScrollQuiet() {
+  if (mode != MODE_IDLE || !pageScrolls(idlePage)) return false;
+  const uint32_t s = listScrollMs();
+  return s && millis() - listAt0 < PAGE_SCROLL_HOLD_MS + s;
 }
 // 고리마다. 굴린 만큼이 바뀌었을 때만 보이는 칸을 다시 깔아 그 칸만 패널로 보낸다
 // (화면 전체 115KB 가 아니라 240 × 130 = 62KB).
-static void recentScrollTick() {
-  if (mode != MODE_IDLE || idlePage != PAGE_RECENT || !recentBoard) return;
-  const uint32_t s = recentScrollMs();
+static void listScrollTick() {
+  if (mode != MODE_IDLE || !pageScrolls(idlePage) || !listBoard) return;
+  const uint32_t s = listScrollMs();
   if (!s) return;
-  const uint32_t e = millis() - recentAt0;
-  const int m = recentScrollMax();
+  const uint32_t e = millis() - listAt0;
+  const int m = listScrollMax(idlePage);
   int off = e <= PAGE_SCROLL_HOLD_MS ? 0 : (int)((e - PAGE_SCROLL_HOLD_MS) * PAGE_SCROLL_PX_S / 1000UL);
   if (off > m) off = m;
-  if (off == recentOff) {
+  if (off == listOff) {
     if (!scrollReported && off == m && scrollFrames) {
       scrollReported = true;
-      Serial.printf("[최근내역] 굴리기 한 번 — %d줄 · %dpx · 프레임 %lu · 그리기+보내기 평균 %.1fms "
+      static const char *const NAMES[] = {"홈", "최근 내역", "오늘 출석", "출석 랭킹", "포인트 랭킹"};
+      Serial.printf("[목록] %s 굴리기 한 번 — %d줄 · %dpx · 프레임 %lu · 그리기+보내기 평균 %.1fms "
                     "최대 %.1fms · 프레임 사이 가장 긴 틈 %lums (보통 %lums)\n",
-                    recentRows(), m, (unsigned long)scrollFrames,
+                    NAMES[idlePage], listRows(idlePage), m, (unsigned long)scrollFrames,
                     scrollUsSum / 1000.0f / scrollFrames, scrollUsMax / 1000.0f,
                     (unsigned long)scrollGapMax, 1000UL / PAGE_SCROLL_PX_S);
     }
     return;
   }
   const uint32_t now = millis(), t0 = micros();
-  recentOff = off;
-  recentCompose(off);
+  listOff = off;
+  listCompose(idlePage, off);
   panel->draw16bitRGBBitmap(0, PAGE_VIEW_TOP, gfx->getFramebuffer() + PAGE_VIEW_TOP * 240, 240,
                             PAGE_VIEW_H);
   const uint32_t us = micros() - t0;
@@ -1052,7 +1054,7 @@ static void recentScrollTick() {
   scrollLastAt = now;
 }
 #else
-static bool recentScrollQuiet() { return false; }
+static bool listScrollQuiet() { return false; }
 #endif
 
 // 대기 화면의 다음 장으로 — 받은 것이 없는 장은 건너뛴다(홈은 늘 있다).
@@ -1064,12 +1066,11 @@ static void pageAdvance() {
     if (pageHasData((IdlePage)p)) break;
   }
   idlePage = (IdlePage)p;
-  if (idlePage == PAGE_RECENT) recentScrollBegin();
+  if (pageScrolls(idlePage)) listScrollBegin();
   // 넘길 장이 홈뿐이면(알림판을 아직 못 받았다) 다시 그리지 않는다 — 서명이 같다.
-  // 최근 내역이면 여기서 그림판을 만든다 — 굴릴 길이(recentPageMs)는 그 뒤에 안다.
+  // 굴리는 장이면 여기서 그림판을 만든다 — 굴릴 길이(listPageMs)는 그 뒤에 안다.
   drawIdle(false);
-  pageNextAt = millis() + (idlePage == PAGE_HOME ? PAGE_HOME_MS
-                                                 : (idlePage == PAGE_RECENT ? recentPageMs() : PAGE_MS));
+  pageNextAt = millis() + (idlePage == PAGE_HOME ? PAGE_HOME_MS : listPageMs());
 #endif
 }
 
@@ -2849,8 +2850,15 @@ void loop() {
       Serial.printf("[와이파이] 연결됨 %s (%s) · RSSI %d dBm\n", WiFi.SSID().c_str(),
                     WiFi.localIP().toString().c_str(), WiFi.RSSI());
       startServers();  // 붙은 뒤에 mDNS·WebSocket 을 켠다
-      fetchConfig();   // 밝기·출석모드를 받아 온다(못 받으면 들고 있던 값으로 돈다)
-      fetchRoster();   // UID→사진 이름. 사진 자체는 대기 중에 한 장씩 미리 받는다
+      if (listScrollQuiet()) {
+        // 목록을 굴리는 중이다 — 받기는 굴리기가 끝난 뒤 아래 받기 자리에서(바로 받으면 화면이
+        // 1초 남짓 멈춘다 · 와이파이가 끊겼다 붙을 때마다 그랬다)
+        cfgWanted = true;
+        rosterWanted = true;
+      } else {
+        fetchConfig();  // 밝기·출석모드를 받아 온다(못 받으면 들고 있던 값으로 돈다)
+        fetchRoster();  // UID→사진 이름. 사진 자체는 대기 중에 한 장씩 미리 받는다
+      }
       // 홈 위 띠의 시각 — 기기에 시계가 없어 NTP 로 맞춘다(기다리지 않는다. 맞으면 다음 분에 뜬다)
       configTzTime("KST-9", "pool.ntp.org", "time.google.com");
       summaryWanted = true;  // 홈 숫자 — 아래 loop 가 대기 화면일 때 받는다
@@ -2873,10 +2881,10 @@ void loop() {
   }
 
   if (serversUp) webSocket.loop();  // 받은 것을 처리
-  // 다시 붙기·heartbeat 가 여기서 돈다. ★ 끊겨 있으면 최근 내역을 굴리는 동안은 부르지 않는다 —
+  // 다시 붙기·heartbeat 가 여기서 돈다. ★ 끊겨 있으면 목록을 굴리는 동안은 부르지 않는다 —
   // 다시 붙는 TLS 핸드셰이크가 1초 남짓 고리를 붙잡아 화면이 멈춘다(v2 에서 재 보니 1209ms). 붙어 있을
   // 때는 받은 것만 처리해 금방 돌아오므로 그대로 부른다. 쉬는 것은 길어야 한 번 굴리는 동안(20초쯤)이다.
-  if (hubBegun && (hubUp || !recentScrollQuiet())) hub.loop();
+  if (hubBegun && (hubUp || !listScrollQuiet())) hub.loop();
 
   // 넘어온 태그 — 조회·지급은 수백 ms 가 걸려 콜백 밖(여기)에서 한다
   char uid[32];
@@ -2892,8 +2900,8 @@ void loop() {
 
   // 설정 다시 받기 — 주기(5분)가 됐거나, 관리 화면이 "지금 받아라" 를 밀었을 때.
   // 민 쪽이 있으면 그 자리에서 받으므로 밝기·출석모드가 누른 즉시 바뀐다.
-  // ★ 이 아래 대기 중 받기들은 최근 내역을 굴리는 동안 쉰다(recentScrollQuiet — 화면이 멈칫거리지 않게).
-  const bool netQuiet = recentScrollQuiet();
+  // ★ 이 아래 대기 중 받기들은 목록을 굴리는 동안 쉰다(listScrollQuiet — 화면이 멈칫거리지 않게).
+  const bool netQuiet = listScrollQuiet();
   if (online && !netQuiet && (cfgWanted || (int32_t)(millis() - cfgNextAt) >= 0)) {
     cfgWanted = false;
     fetchConfig();
@@ -3179,7 +3187,7 @@ void loop() {
   // 패널로 밀어 넣어 그만큼 루프가 길어졌다(그래서 밖에서 보낸 것에 답하는 데까지
   // 55ms 단위로 끊겼다).
 #if PAGES_ENABLE
-  recentScrollTick();  // 최근 내역을 굴리는 중이면 보이는 칸만 — 아래 drawIdle 은 분이 바뀔 때만 그린다
+  listScrollTick();  // 목록을 굴리는 중이면 보이는 칸만 — 아래 drawIdle 은 분이 바뀔 때만 그린다
 #endif
   if (mode == MODE_IDLE && (int32_t)(millis() - idleNextAt) >= 0) drawIdle(false);
 }
