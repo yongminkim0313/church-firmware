@@ -1,7 +1,9 @@
 #pragma once
 // funfunFirmware — 대기 화면 네 장 240×240 원형 (홈 뒤로 돌아가며 띄운다)
 //
-// 홈(home.h)과 같은 띠 · 바탕 · '카드를 대 주세요' 를 두르고, 가운데만 바꾼다:
+// 홈(home.h)과 같은 띠 · 바탕 · '카드를 대 주세요' 를 두르고, 가운데만 바꾼다.
+// 2026-11-06 저녁: 앱의 내역 화면에 맞췄다 — 흰 카드 하나에 줄을 가름선으로 나누고, 줄 왼쪽에
+// 앱과 같은 분류 뱃지(art.h)를 단다. 하는 일은 그대로다.
 //
 //   최근 내역    ┌ (↑) 오이안            +5P ┐   줄마다 카드 한 장 — 이름 · 분류·사유 · 몇 분 전
 //                └     출석 · 3분 전          ┘   PAGE_RECENT_N 줄 — 넷이 넘으면 천천히 아래로 굴린다
@@ -32,10 +34,11 @@
 #define PAGE_ROW_W 188
 #define PAGE_TOP_Y 60  // 가운데 칸 위 끝(위 띠의 타원 · 점 아래)
 
-#define PAGE_GOLD RGB565(240, 182, 30)
-#define PAGE_SILVER RGB565(168, 176, 186)
-#define PAGE_BRONZE RGB565(200, 126, 62)
-#define PAGE_SPEND_SOFT RGB565(250, 216, 210)
+// 메달 — 앱 순위(Art.swift 의 1 · 2 등 색)와 같은 쪽
+#define PAGE_GOLD RGB565(242, 196, 56)
+#define PAGE_SILVER RGB565(189, 194, 204)
+#define PAGE_BRONZE RGB565(214, 146, 92)
+#define PAGE_CARD_R 12  // 카드 모서리
 
 enum IdlePage { PAGE_HOME, PAGE_RECENT, PAGE_TODAY, PAGE_ATTEND, PAGE_POINTS, PAGE_COUNT };
 
@@ -134,40 +137,54 @@ static void pageEmpty(const char *msg) {
   homeTextC(msg, CX, 124, HOME_GREY, HOME_FONT_M);
 }
 
-// 줄 카드 바탕
-static void pageRowCard(int y, int h, uint16_t fill, uint16_t edge) {
-  gfx->fillRoundRect(PAGE_ROW_X, y, PAGE_ROW_W, h, h / 3, fill);
-  gfx->drawRoundRect(PAGE_ROW_X, y, PAGE_ROW_W, h, h / 3, edge);
+// 분류 뱃지 — 앱 FFArt.category · line 과 같은 고르기. why 는 '분류 · 사유'(사유가 없으면 분류만).
+// 분류 이름으로 먼저 고르고, 모르는 분류(교회가 늘린 것)는 낱말로 짚고, 그래도 못 짚으면 곰 포인트.
+static const uint16_t *pageBadgeOf(const char *why) {
+  char cat[48];
+  strlcpy(cat, why ? why : "", sizeof(cat));
+  if (char *dot = strstr(cat, PAGE_MIDDOT)) {
+    while (dot > cat && dot[-1] == ' ') dot--;
+    *dot = '\0';
+  }
+  if (!strcmp(cat, "출석")) return ART_BADGE_ATTEND;
+  if (!strcmp(cat, "전도/초청") || !strcmp(cat, "새친구")) return ART_BADGE_INVITE;
+  if (!strcmp(cat, "간식 교환")) return ART_BADGE_SNACK;
+  if (!strcmp(cat, "예배 태도")) return ART_BADGE_MOOD;
+  const char *w = why ? why : "";
+  if (strstr(w, "출석") || strstr(w, "예배")) return ART_BADGE_ATTEND;
+  if (strstr(w, "초청") || strstr(w, "초대") || strstr(w, "전도") || strstr(w, "친구"))
+    return ART_BADGE_INVITE;
+  if (strstr(w, "간식") || strstr(w, "상품") || strstr(w, "교환")) return ART_BADGE_SNACK;
+  if (strstr(w, "태도") || strstr(w, "마음")) return ART_BADGE_MOOD;
+  return ART_BADGE_POINT;
 }
 
 // ── 최근 내역 ─────────────────────────────────────────────────────
-#define PAGE_RECENT_H 30     // 줄 카드 높이
-#define PAGE_RECENT_STEP 33  // 줄 간격
-// 줄 하나를 y(위 끝)에 그린다. passed = 받은 뒤 흐른 초('몇 분 전' 에 더한다).
+#define PAGE_RECENT_H 34     // 줄 높이 — 카드 하나를 가름선으로 나눠 줄 사이 틈이 없다
+#define PAGE_RECENT_STEP 34
+#define PAGE_RECENT_TX (PAGE_ROW_X + 8 + ART_BADGE_PX + 7)  // 글자가 시작하는 곳(가름선도 여기서)
+
+// 줄 하나를 y(위 끝)에 그린다 — 앱 내역 줄처럼 (뱃지) 이름 / 분류 · 사유 · 몇 분 전 · 오른쪽 +5P.
+// passed = 받은 뒤 흐른 초('몇 분 전' 에 더한다). 흰 카드 위에 그린다(listCardDraw).
 static void pageRecentRow(const PageRecent &r, int y, uint32_t passed) {
-  const int h = PAGE_RECENT_H, cy = y + h / 2;
+  const int cy = y + PAGE_RECENT_H / 2;
   const bool earn = r.delta >= 0;
-  pageRowCard(y, h, HOME_CARD, HOME_LINE);
+  homeArt(pageBadgeOf(r.why), ART_BADGE_PX, PAGE_ROW_X + 8, cy - ART_BADGE_PX / 2);
 
-  // 왼쪽 동그라미 — 홈의 '오늘' 줄과 같은 화살표(지급 ↑ 주황 · 사용 ↓ 빨강)
-  const int bx = PAGE_ROW_X + 16;
-  gfx->fillCircle(bx, cy, 10, earn ? HOME_ORANGE_SOFT : PAGE_SPEND_SOFT);
-  homeArrow(bx, cy, earn, earn ? HOME_ORANGE : HOME_RED);
-
-  // 오른쪽 '+5P' · '-3P'
+  // 오른쪽 '+5P' · '-3P' — 앱처럼 지급 초록 · 사용 주황
   char val[20], num[16];
   commafy(earn ? r.delta : -r.delta, num, sizeof(num));
   snprintf(val, sizeof(val), "%s%sP", earn ? "+" : "-", num);
   const int valW = homeTextW(val, HOME_FONT_M) + 1;
-  const int right = PAGE_ROW_X + PAGE_ROW_W - 8;
-  homeTextL(val, right - valW, cy, earn ? HOME_GREEN : HOME_RED, HOME_FONT_M, true);
+  const int right = PAGE_ROW_X + PAGE_ROW_W - 10;
+  homeTextL(val, right - valW, cy, earn ? HOME_EARN : HOME_SPEND, HOME_FONT_M, true);
 
   // 가운데 두 줄 — 이름 / '분류 · 사유 · 3분 전'(길면 사유를 자르고 시각은 남긴다)
-  const int tx = bx + 16, room = right - valW - 6 - tx;
+  const int tx = PAGE_RECENT_TX, room = right - valW - 6 - tx;
   char nm[PAGE_NAME_LEN + 4];
   strlcpy(nm, r.name[0] ? r.name : "(이름 없음)", sizeof(nm));
   pageFit(nm, sizeof(nm), room, HOME_FONT_S);
-  homeTextL(nm, tx, cy - 7, HOME_BROWN, HOME_FONT_S, true);
+  homeTextL(nm, tx, cy - 7, HOME_INK, HOME_FONT_S, true);
 
   char ago[16], why[sizeof(r.why) + 4], sub[sizeof(why) + 24];
   pageAgo(r.agoSec + passed, ago, sizeof(ago));
@@ -183,7 +200,7 @@ static void pageRecentRow(const PageRecent &r, int y, uint32_t passed) {
     pageFit(why, sizeof(why), whyRoom, PAGE_FONT_XS);
   }
   snprintf(sub, sizeof(sub), "%s " PAGE_MIDDOT " %s", why, ago);
-  pageTextDots(sub, tx, cy + 7, HOME_GREY, PAGE_FONT_XS);
+  pageTextDots(sub, tx, cy + 8, HOME_GREY, PAGE_FONT_XS);
 }
 
 // ── 오늘 출석 ─────────────────────────────────────────────────────
@@ -191,22 +208,24 @@ static void pageToday() {
   const PagesData &d = pagesData;
   if (!d.todayN) return pageEmpty("아직 아무도 없어요");
 
-  // 머리 — [(사람) 12명 출석] 주황 알약(홈의 '내 포인트' 와 같은 꼴)
+  // 머리 — (토끼 뱃지) 12명 출석
   {
     char s[24];
     snprintf(s, sizeof(s), "%d명 출석", d.todayN);
-    const int cy = 72, w = 8 + 14 + 4 + homeTextW(s, HOME_FONT_S) + 1 + 12;
+    const int cy = 72, w = ART_BADGE_PX + 6 + homeTextW(s, HOME_FONT_M) + 1;
     const int x = CX - w / 2;
-    gfx->fillRoundRect(x, cy - 11, w, 22, 11, HOME_ORANGE);
-    homePerson(x + 8 + 7, cy, RGB565_WHITE);
-    homeTextL(s, x + 8 + 14 + 4, cy, RGB565_WHITE, HOME_FONT_S, true);
+    homeArt(ART_BADGE_ATTEND, ART_BADGE_PX, x, cy - ART_BADGE_PX / 2);
+    homeTextL(s, x + ART_BADGE_PX + 6, cy, HOME_INK, HOME_FONT_M, true);
   }
 
-  // 이름 알약 — 세 칸씩 네 줄. 넘치면 마지막 칸을 '외 N명' 으로 바꾼다.
-  const int cols = 3, cw = 58, ch = 20, gx = 5, top = 90, step = 24;
+  // 이름 칩 — 흰 카드 안에 세 칸씩 네 줄(앱 학생 카드의 '초4 · 소망반' 회색 칩).
+  // 넘치면 마지막 칸을 '외 N명' 으로 바꾼다(옅은 주황).
+  const int cols = 3, cw = 56, ch = 19, gx = 5, top = 94, step = 23;
   const int shown = d.todayN < PAGE_TODAY_N ? d.todayN : PAGE_TODAY_N;
   const bool more = d.todayN > PAGE_TODAY_N;
   const int names = more ? PAGE_TODAY_N - 1 : shown;
+  const int rows = (shown + cols - 1) / cols;
+  gfx->fillRoundRect(PAGE_ROW_X, top - 7, PAGE_ROW_W, rows * step + 10, PAGE_CARD_R, HOME_CARD);
   for (int i = 0; i < shown; i++) {
     const int row = i / cols, col = i % cols;
     const int inRow = (row == (shown - 1) / cols) ? shown - row * cols : cols;  // 끝 줄은 가운데로
@@ -214,31 +233,30 @@ static void pageToday() {
     const int x = x0 + col * (cw + gx), y = top + row * step;
     char s[PAGE_NAME_LEN + 4];
     if (i < names) {
-      gfx->fillRoundRect(x, y, cw, ch, ch / 2, HOME_CARD);
-      gfx->drawRoundRect(x, y, cw, ch, ch / 2, HOME_LINE);
+      gfx->fillRoundRect(x, y, cw, ch, ch / 2, HOME_CHIP);
       strlcpy(s, d.today[i], sizeof(s));
       pageFit(s, sizeof(s), cw - 8, HOME_FONT_S);
-      homeTextC(s, x + cw / 2, y + ch / 2, HOME_BROWN, HOME_FONT_S);
+      homeTextC(s, x + cw / 2, y + ch / 2, HOME_INK, HOME_FONT_S);
     } else {
-      gfx->fillRoundRect(x, y, cw, ch, ch / 2, HOME_ORANGE_SOFT);
+      gfx->fillRoundRect(x, y, cw, ch, ch / 2, HOME_BRAND_SOFT);
       snprintf(s, sizeof(s), "외 %d명", d.todayN - names);
-      homeTextC(s, x + cw / 2, y + ch / 2, HOME_ORANGE, HOME_FONT_S, true);
+      homeTextC(s, x + cw / 2, y + ch / 2, HOME_BRAND, HOME_FONT_S, true);
     }
   }
 }
 
 // ── 랭킹 (출석 · 포인트) ─────────────────────────────────────────
-#define PAGE_RANK_H 24
+#define PAGE_RANK_H 26  // 다섯 줄(130)이 보이는 칸에 꼭 든다
 #define PAGE_RANK_STEP 26
 
-// 순위 줄 하나를 y(위 끝)에 그린다. 1등 줄만 주황으로 칠한다.
-static void pageRankRow(const PageRank &r, int y, const char *unit, uint16_t valColor) {
-  const int h = PAGE_RANK_H, cy = y + h / 2;
-  const bool first = r.rank == 1;
-  pageRowCard(y, h, first ? HOME_ORANGE_SOFT : HOME_CARD, first ? HOME_ORANGE : HOME_LINE);
+#define PAGE_RANK_TX (PAGE_ROW_X + 34)  // 이름이 시작하는 곳(가름선도 여기서)
 
-  // 등수 메달 — 1·2·3 은 금·은·동, 그 밑은 회색 테
-  const int mx = PAGE_ROW_X + 15;
+// 순위 줄 하나를 y(위 끝)에 그린다 — (메달) 이름 · 오른쪽 값. 흰 카드 위에 그린다(listCardDraw).
+static void pageRankRow(const PageRank &r, int y, const char *unit, uint16_t valColor) {
+  const int cy = y + PAGE_RANK_H / 2;
+
+  // 등수 메달 — 1·2·3 은 금·은·동, 그 밑은 회색 칩
+  const int mx = PAGE_ROW_X + 17;
   char rk[8];
   snprintf(rk, sizeof(rk), "%d", r.rank);
   if (r.rank >= 1 && r.rank <= 3) {
@@ -246,7 +264,7 @@ static void pageRankRow(const PageRank &r, int y, const char *unit, uint16_t val
     gfx->fillCircle(mx, cy, 9, medal);
     homeTextC(rk, mx + 1, cy, RGB565_WHITE, HOME_FONT_S, true);
   } else {
-    gfx->drawCircle(mx, cy, 9, HOME_LINE);
+    gfx->fillCircle(mx, cy, 9, HOME_CHIP);
     homeTextC(rk, mx + 1, cy, HOME_GREY, HOME_FONT_S, true);
   }
 
@@ -255,14 +273,14 @@ static void pageRankRow(const PageRank &r, int y, const char *unit, uint16_t val
   commafy(r.value, num, sizeof(num));
   snprintf(val, sizeof(val), "%s%s", num, unit);
   const int valW = homeTextW(val, HOME_FONT_M) + 1;
-  const int right = PAGE_ROW_X + PAGE_ROW_W - 9;
+  const int right = PAGE_ROW_X + PAGE_ROW_W - 10;
   homeTextL(val, right - valW, cy, valColor, HOME_FONT_M, true);
 
-  const int tx = mx + 16;
+  const int tx = PAGE_RANK_TX;
   char nm[PAGE_NAME_LEN + 4];
   strlcpy(nm, r.name[0] ? r.name : "(이름 없음)", sizeof(nm));
   pageFit(nm, sizeof(nm), right - valW - 6 - tx, HOME_FONT_S);
-  homeTextL(nm, tx, cy, HOME_BROWN, HOME_FONT_S, true);
+  homeTextL(nm, tx, cy, HOME_INK, HOME_FONT_S, true);
 }
 
 // ── 목록 굴리기 (최근 내역 · 출석 랭킹 · 포인트 랭킹) ─────────────
@@ -311,8 +329,19 @@ static int listScrollMax(IdlePage p) {
 static void listRowDraw(IdlePage p, int i, int y, uint32_t passed) {
   const PagesData &d = pagesData;
   if (p == PAGE_RECENT) pageRecentRow(d.recent[i], y, passed);
-  else if (p == PAGE_ATTEND) pageRankRow(d.month[i], y, "회", HOME_ORANGE);
-  else pageRankRow(d.points[i], y, "P", HOME_GREEN);
+  else if (p == PAGE_ATTEND) pageRankRow(d.month[i], y, "회", HOME_INK);
+  else pageRankRow(d.points[i], y, "P", HOME_BRAND);  // 앱의 잔액과 같은 주황
+}
+
+// 흰 카드 하나에 줄 n 개 — 위 끝 y0. 줄 사이는 글자 시작점부터 가름선(앱 내역 목록과 같은 꼴).
+static void listCardDraw(IdlePage p, int y0, int n, uint32_t passed) {
+  const int step = listStep(p);
+  gfx->fillRoundRect(PAGE_ROW_X, y0, PAGE_ROW_W, n * step, PAGE_CARD_R, HOME_CARD);
+  const int lx = p == PAGE_RECENT ? PAGE_RECENT_TX : PAGE_RANK_TX;
+  for (int i = 0; i < n; i++) {
+    if (i) gfx->drawFastHLine(lx, y0 + i * step, PAGE_ROW_X + PAGE_ROW_W - 10 - lx, HOME_LINE);
+    listRowDraw(p, i, y0 + i * step, passed);
+  }
 }
 
 // 그림판을 그 장의 지금 내용으로. 바뀐 것이 없으면 그냥 돌아간다. 못 잡으면 false.
@@ -349,7 +378,7 @@ static bool listBoardEnsure(IdlePage p, uint32_t passed) {
   Arduino_Canvas *screen = gfx;  // 줄 그리는 함수들은 gfx 에 그린다 — 잠깐 그림판으로 돌린다
   gfx = listBoard;
   gfx->fillRect(0, 0, 240, listContentH(p) + 1, TRANSPARENT_KEY);
-  for (int i = 0; i < listRows(p); i++) listRowDraw(p, i, i * listStep(p), passed);
+  listCardDraw(p, 0, listRows(p), passed);
   gfx = screen;
   Serial.printf("[목록] 그림판 %d줄 다시 그림 (%lums)\n", listRows(p),
                 (unsigned long)((micros() - t0 + 500) / 1000));
@@ -389,11 +418,9 @@ static void pageList(IdlePage p) {
   }
   // 그림판을 못 잡았다 — 예전처럼 원 안에 드는 줄만 바로 그린다
   listBoardFailed = true;
-  for (int i = 0; i < listRows(p); i++) {
-    const int y = PAGE_TOP_Y + i * listStep(p);
-    if (y + listRowH(p) > PAGE_VIEW_BOT) break;
-    listRowDraw(p, i, y, passed);
-  }
+  int fit = PAGE_VIEW_H / listStep(p);
+  if (fit > listRows(p)) fit = listRows(p);
+  listCardDraw(p, PAGE_TOP_Y, fit, passed);
 }
 
 // 대기 화면 한 장. 홈은 home.h 의 homeDraw 로 — 여기는 나머지 넷.
