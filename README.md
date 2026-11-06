@@ -17,9 +17,10 @@
 | `nfcProject/slave` | ESP32-C3 SuperMini + PN532(SPI) + 부저 + DFPlayer Mini(UART) | **리더만** 맡는다. 화면이 없고, 읽은 UID 를 넘긴 뒤 결과를 **부저와 한국어 말**로 알린다 |
 | `nfcProject/single` | LILYGO T-RGB 2.1" 원형 + PN532(I2C) + 스피커 | **master + slave 를 한 보드로 합친 것.** 읽고·묻고·그리고·소리까지 혼자 한다 |
 | `funfunFirmware` | ESP32-S3-N16R8 + GC9A01 240×240 원형(SPI) + PN532(SPI) + DFPlayer Mini(UART) | `master` 를 **사진 없이 글자만**으로 옮긴 판. microSD 도 터치도 없다(BOOT 버튼으로 대신) |
+| `funfunFirmware_v2` | ESP32-S3-N16R8 + GC9A01 240×240 원형(SPI) + PN532(소프트웨어 SPI) + **microSD 모듈(HSPI) + MAX98357A(I2S)** | `funfunFirmware` 에서 **소리만 바꾼 판** — DFPlayer 를 걷어내고 ESP32 가 SD 의 WAV 를 직접 읽어 앰프로 낸다. 화면·서버 코드는 같다(한쪽을 고치면 다른 쪽에도 옮길 것). 배선은 `src/main.cpp` 머리말 |
 | `jdSnapRemote` | ESP32-C3 SuperMini + 단추(+LED·부저) | **꾸미포토(jdSnap) 네 컷 부스의 리모컨.** 단추를 누르면 아이패드·태블릿의 부스 앱이 촬영을 시작한다. NFC 도 서버도 와이파이도 없다 |
 
-세 판(`master`·`single`·`funfunFirmware`)이 서버와 직접 말한다 — 조회·지급, 설정 받기,
+네 판(`master`·`single`·`funfunFirmware`·`funfunFirmware_v2`)이 서버와 직접 말한다 — 조회·지급, 설정 받기,
 그리고 `/ws/device` 로 붙어 변화를 받는다. `slave` 와 `jdSnapRemote` 는 서버를 모른다.
 
 ## 받아 간 뒤 한 번 — 인증정보
@@ -54,7 +55,7 @@ cp secrets/ChurchSecrets.example.h secrets/ChurchSecrets.h
 
 ```bash
 cd nfcProject/master    # 또는 single · slave
-                        # (funfunFirmware · jdSnapRemote 는 저장소 바로 아래다)
+                        # (funfunFirmware · funfunFirmware_v2 · jdSnapRemote 는 저장소 바로 아래다)
 pio run                 # 빌드만
 pio run -t upload       # 구워 넣기
 pio device monitor      # 115200
