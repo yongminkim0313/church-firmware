@@ -95,11 +95,21 @@ static int nameCount = 0;
 static volatile bool namesReady = false;
 static portMUX_TYPE nameMux = portMUX_INITIALIZER_UNLOCKED;
 
+// 넘겨받는 것은 세 갈래다 — 이름 소리 · 고정 토막(5단계 · 서버가 만든 판) · 판 이름(/voice.ver).
+enum StoreKind : uint8_t { STORE_NAME, STORE_CLIP, STORE_VER };
 static volatile bool storePending = false;  // 본 고리가 세우고, 일꾼이 다 쓰면 내린다
-static char storeKey[9];
+static uint8_t storeKind = STORE_NAME;
+static char storeKey[9];                     // 이름 키 · 판 이름(빈 값이면 /voice.ver 를 지운다)
+static uint8_t storeFolder = 0, storeTrack = 0;  // 고정 토막
 static uint8_t *storeBuf = nullptr;
 static size_t storeLen = 0;
 static uint32_t storedCount = 0, storeFailCount = 0;  // 이번에 켠 뒤로 — 상태 줄에 찍는다
+static uint32_t clipStoredCount = 0;
+
+// SD 의 고정 토막이 어느 판인가(/voice.ver 의 8자). 맥 스크립트로 넣은 카드는 파일이 없어 빈 값이다.
+// 일꾼이 켤 때 읽고 판을 다 받은 뒤 고친다. 본 고리는 soundPackVer() 로 베껴 간다(nameMux 안).
+#define SND_VER_FILE "/voice.ver"
+static char packVer[9] = "";
 
 // '0a1b2c3d' → 0x0a1b2c3d. 꼴이 아니면 false.
 static bool keyOf(const char *s, uint32_t *out) {
@@ -146,6 +156,14 @@ static void nameDrop(uint32_t k) {
 static void nameScan() {
   if (!nameKeys) nameKeys = (uint32_t *)ps_malloc(sizeof(uint32_t) * NAME_VOICE_MAX);
   if (!sdOk || !nameKeys) return;  // namesReady 를 세우지 않는다 — 받으러 가지 않는다
+  // 고정 토막의 판
+  if (File v = SD.open(SND_VER_FILE)) {
+    char b[9] = "";
+    const int n = v.read((uint8_t *)b, 8);
+    v.close();
+    uint32_t k;
+    if (n == 8 && keyOf(b, &k)) memcpy(packVer, b, 9);
+  }
   if (!SD.exists(SND_NAME_FOLDER)) SD.mkdir(SND_NAME_FOLDER);
   File dir = SD.open(SND_NAME_FOLDER);
   if (!dir || !dir.isDirectory()) return;
@@ -169,36 +187,70 @@ static void nameScan() {
   dir.close();
   for (int i = 0; i < tmpN; i++) SD.remove(tmps[i]);  // 훑기를 마친 뒤에 지운다
   namesReady = true;
-  Serial.printf("[이름소리] SD 에 %d개%s%s\n", nameCount, tmpN ? " · 반쪽 파일 지움" : "",
-                over ? " · ★ 목록이 넘쳐 일부를 못 셌다(NAME_VOICE_MAX)" : "");
+  Serial.printf("[이름소리] SD 에 %d개%s%s · 고정 토막 판 %s\n", nameCount,
+                tmpN ? " · 반쪽 파일 지움" : "",
+                over ? " · ★ 목록이 넘쳐 일부를 못 셌다(NAME_VOICE_MAX)" : "",
+                packVer[0] ? packVer : "없음(맥에서 구운 것이거나 빈 카드)");
+}
+
+// buf 를 tmp 에 다 쓴 뒤 fin 으로 이름을 바꾼다 — 쓰다 전원이 나가도 반쪽 파일이 fin 으로 남지 않게.
+// (FILE_WRITE 는 있던 tmp 를 비우고 쓰므로 전에 남은 반쪽 tmp 는 그대로 덮인다)
+static bool writeSwap(const char *tmp, const char *fin, const uint8_t *buf, size_t len) {
+  bool ok = false;
+  File f = SD.open(tmp, FILE_WRITE);
+  if (f) {
+    const size_t n = f.write(buf, len);
+    f.close();
+    if (n == len) {
+      if (SD.exists(fin)) SD.remove(fin);
+      ok = SD.rename(tmp, fin);
+    }
+    if (!ok) SD.remove(tmp);
+  }
+  return ok;
 }
 
 // 넘겨받은 것을 쓴다(일꾼 안 · 줄이 빌 때). .tmp 에 다 쓴 뒤 이름을 바꾼다 —
 // 쓰다 전원이 나가도 반쪽 파일이 .wav 로 남아 틀리지 않게.
 static void nameStore() {
   char tmp[24], fin[24];
-  snprintf(tmp, sizeof(tmp), SND_NAME_FOLDER "/%s.tmp", storeKey);
-  snprintf(fin, sizeof(fin), SND_NAME_FOLDER "/%s.wav", storeKey);
   bool ok = false;
-  File f = SD.open(tmp, FILE_WRITE);
-  if (f) {
-    const size_t n = f.write(storeBuf, storeLen);
-    f.close();
-    if (n == storeLen) {
-      if (SD.exists(fin)) SD.remove(fin);
-      ok = SD.rename(tmp, fin);
+  if (storeKind == STORE_NAME) {
+    snprintf(tmp, sizeof(tmp), SND_NAME_FOLDER "/%s.tmp", storeKey);
+    snprintf(fin, sizeof(fin), SND_NAME_FOLDER "/%s.wav", storeKey);
+    ok = writeSwap(tmp, fin, storeBuf, storeLen);
+    uint32_t k;
+    if (ok && keyOf(storeKey, &k)) {
+      nameAdd(k);
+      storedCount++;
     }
-    if (!ok) SD.remove(tmp);
+  } else if (storeKind == STORE_CLIP) {
+    // 빈 카드에서 시작하면 폴더가 없다 — 판을 받으며 만든다
+    char dir[8];
+    snprintf(dir, sizeof(dir), "/%02u", storeFolder);
+    if (!SD.exists(dir)) SD.mkdir(dir);
+    snprintf(tmp, sizeof(tmp), "%s/%03u.tmp", dir, storeTrack);
+    snprintf(fin, sizeof(fin), "%s/%03u.wav", dir, storeTrack);
+    ok = writeSwap(tmp, fin, storeBuf, storeLen);
+    if (ok) clipStoredCount++;
+  } else {  // STORE_VER — 빈 값이면 지운다(판을 받기 시작할 때: 다 받기 전에 '같은 판' 으로 보이지 않게)
+    snprintf(fin, sizeof(fin), "%s", SND_VER_FILE);
+    if (!storeKey[0]) {
+      ok = !SD.exists(fin) || SD.remove(fin);
+    } else {
+      ok = writeSwap("/voice.tmp", fin, (const uint8_t *)storeKey, 8);
+    }
+    if (ok) {
+      portENTER_CRITICAL(&nameMux);
+      memcpy(packVer, storeKey, sizeof(packVer));
+      portEXIT_CRITICAL(&nameMux);
+    }
   }
-  uint32_t k;
-  if (ok && keyOf(storeKey, &k)) {
-    nameAdd(k);
-    storedCount++;
-  } else {
+  if (!ok) {
     storeFailCount++;
-    Serial.printf("[이름소리] %s 를 SD 에 못 썼다 — 카드가 꽉 찼거나 빠졌다\n", storeKey);
+    Serial.printf("[이름소리] %s 를 SD 에 못 썼다 — 카드가 꽉 찼거나 빠졌다\n", fin);
   }
-  free(storeBuf);
+  free(storeBuf);  // STORE_VER 는 nullptr — free 는 그냥 지나간다
   storeBuf = nullptr;
   storePending = false;
 }
@@ -536,6 +588,38 @@ bool soundHasName(const char *key) {
 
 bool soundStoreBusy() { return storePending; }
 
+bool soundStoreClip(uint8_t folder, uint8_t track, uint8_t *buf, size_t len) {
+  // 이름 폴더(09)에는 쓰지 않는다 — 판에는 01~08 만 온다
+  if (!namesReady || storePending || !buf || !len || folder < 1 || folder > 8 || !track) return false;
+  storeKind = STORE_CLIP;
+  storeFolder = folder;
+  storeTrack = track;
+  storeBuf = buf;
+  storeLen = len;
+  storePending = true;
+  if (sndTask) xTaskNotifyGive(sndTask);
+  return true;
+}
+
+bool soundStorePackVer(const char *ver) {
+  uint32_t k;
+  if (!namesReady || storePending || !ver) return false;
+  if (ver[0] && (strlen(ver) != 8 || !keyOf(ver, &k))) return false;
+  storeKind = STORE_VER;
+  strlcpy(storeKey, ver, sizeof(storeKey));
+  storeBuf = nullptr;
+  storeLen = 0;
+  storePending = true;
+  if (sndTask) xTaskNotifyGive(sndTask);
+  return true;
+}
+
+void soundPackVer(char *out, size_t n) {
+  portENTER_CRITICAL(&nameMux);
+  strlcpy(out, packVer, n);
+  portEXIT_CRITICAL(&nameMux);
+}
+
 bool soundSayName(const char *key) {
   uint32_t k;
   if (!soundHasName(key) || !keyOf(key, &k)) return false;
@@ -548,6 +632,7 @@ bool soundStoreName(const char *key, uint8_t *buf, size_t len) {
   uint32_t k;
   if (!namesReady || storePending || !buf || !len || !key || strlen(key) != 8 || !keyOf(key, &k))
     return false;
+  storeKind = STORE_NAME;
   strlcpy(storeKey, key, sizeof(storeKey));
   storeBuf = buf;
   storeLen = len;
@@ -560,6 +645,9 @@ bool soundNamesReady() { return false; }
 bool soundHasName(const char *) { return false; }
 bool soundStoreBusy() { return false; }
 bool soundStoreName(const char *, uint8_t *, size_t) { return false; }
+bool soundStoreClip(uint8_t, uint8_t, uint8_t *, size_t) { return false; }
+bool soundStorePackVer(const char *) { return false; }
+void soundPackVer(char *out, size_t n) { if (n) out[0] = '\0'; }
 bool soundSayName(const char *) { return false; }
 #endif
 
@@ -673,6 +761,9 @@ void soundReport() {
                 namesReady ? "" : " (아직 안 훑음 — SD 가 없거나 켜는 중)",
                 (unsigned long)storedCount, (unsigned long)storeFailCount,
                 storePending ? " · 쓰는 중" : "");
+  Serial.printf("[고정토막] SD 의 판 %s · 이번에 갈아 끼운 토막 %lu\n",
+                packVer[0] ? packVer : "없음(맥에서 구운 것이거나 받는 중)",
+                (unsigned long)clipStoredCount);
 #endif
 }
 
@@ -691,6 +782,9 @@ bool soundHasName(const char *) { return false; }
 bool soundWavOk(const uint8_t *, size_t) { return false; }
 bool soundStoreName(const char *, uint8_t *, size_t) { return false; }
 bool soundStoreBusy() { return false; }
+bool soundStoreClip(uint8_t, uint8_t, uint8_t *, size_t) { return false; }
+bool soundStorePackVer(const char *) { return false; }
+void soundPackVer(char *out, size_t n) { if (n) out[0] = '\0'; }
 bool soundSayName(const char *) { return false; }
 void soundTestNext() { Serial.println("[소리] 꺼 두었습니다 (SOUND_ENABLE 0)"); }
 void soundReport() { Serial.println("[소리] 꺼 두었습니다 (SOUND_ENABLE 0)"); }

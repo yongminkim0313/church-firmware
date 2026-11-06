@@ -30,6 +30,7 @@
 //   /02/001.wav … /02/014.wav   숫자 토막 (영·일~구·십·백·천·만) — 100 초과의 앞자리용
 //                               (영·일·십 은 쓰이지 않는다. 번호 자리만 지킨다)
 //   /03/001.wav … /03/101.wav   0~100 통째 (번호 = 수 + 1)
+//   /voice.ver                  고정 토막이 서버의 어느 판인가(5단계 — 기기가 받아 갈아 끼운다)
 //   /09/<키 8자>.wav            아이 이름 — **기기가 스스로 받아 쓴다**(손으로 넣지 않는다 ·
 //                               폴더도 없으면 만든다). 아래 '이름 소리' · NAME_VOICE.md
 // WAV 는 PCM 16비트 · 모노 · 22050Hz 다(tools/make_voices.sh — 맥의 say -v Yuna + ffmpeg).
@@ -133,6 +134,15 @@ bool soundStoreName(const char *key, uint8_t *buf, size_t len);
 
 // 앞에 넘긴 것을 아직 쓰는 중이다.
 bool soundStoreBusy();
+
+// ── 고정 토막 판 (5단계 — 서버가 같은 목소리로 만든 /01 · /02 · /03) ──
+// 받은 토막을 /NN/NNN.wav 자리에 갈아 끼운다(쓰는 길은 이름 소리와 같다 — buf 는 일꾼 것이 된다).
+bool soundStoreClip(uint8_t folder, uint8_t track, uint8_t *buf, size_t len);
+// /voice.ver 에 판 이름(16진 8자)을 쓴다. 빈 값이면 지운다 — 판을 받기 시작할 때 먼저 지워 두어,
+// 다 받기 전에 끊겨도 '같은 판' 으로 보이지 않게.
+bool soundStorePackVer(const char *ver);
+// SD 의 판 이름(없으면 빈 값). 맥 스크립트로 넣은 카드는 파일이 없다.
+void soundPackVer(char *out, size_t n);
 
 // 이름 소리 하나만 읽는다(시리얼 'a'). 읽던 것은 끊는다. SD 에 없으면 false.
 bool soundSayName(const char *key);

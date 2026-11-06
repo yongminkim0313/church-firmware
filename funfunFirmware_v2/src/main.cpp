@@ -1392,30 +1392,25 @@ static const uint16_t *photoGet(const char *img, bool forTag) {
 }
 
 // ── 이름 소리 받기 (GET /api/talent/voice/device/<키>.wav) ───────
-// 대기 때 하나씩 — PSRAM 에 통째로 받아 소리 일꾼에게 넘기면 일꾼이 SD 의 /09 에 쓴다
-// (SD 는 일꾼만 만진다 — sound.h). 한 개 30KB 쯤 · https 로 1초 안쪽.
-// 돌려주는 값: 200 이면 넘겼다, 404 면 서버가 내줄 것이 없다(다음 이름표까지 묻지 않는다),
-// 그 밖(503·끊김·꼴이 틀림)은 잠시 쉬었다 다음 이름으로 — 그 이름은 다음 이름표 때 다시 묻는다.
-// ★ 200 이 아니면 SD 에 쓰지 않는다(서버의 404·503 JSON 을 소리로 쓰지 않게).
-static int voiceGet(const char *key) {
-#if !(NAME_VOICE_ENABLE && SOUND_ENABLE)
-  (void)key;
-  return 0;
-#else
-  char url[160];
-  snprintf(url, sizeof(url), "%s/api/talent/voice/device/%s.wav", TALENT_SERVER, key);
-  const uint32_t t0 = millis();
+// 서버의 WAV 하나를 PSRAM 에 통째로 받는다 — 이름 소리와 고정 토막(5단계)이 같이 쓴다.
+// 돌려주는 값: 200 이면 *out 에 담았다(부른 쪽이 넘기거나 free 한다). 그 밖은 HTTP 코드거나 -1
+// (크기가 이상함 · 중간에 끊김 · 틀 수 없는 꼴) — 그때 *out 은 nullptr 다.
+// ★ 200 이 아니면 담지 않는다(서버의 404·503 JSON 을 소리로 쓰지 않게).
+#if NAME_VOICE_ENABLE && SOUND_ENABLE
+static int wavGet(const char *url, const char *tag, uint8_t **out, size_t *outLen) {
+  *out = nullptr;
+  *outLen = 0;
   const int code = httpGet(url);
   if (code != HTTP_CODE_OK) {
     http.end();
-    Serial.printf("[이름소리] %s 받기 실패 code=%d\n", key, code);
+    Serial.printf("[이름소리] %s 받기 실패 code=%d\n", tag, code);
     return code;
   }
   // 서버는 Content-Length 를 붙여 보낸다(res.send). 모르는 길이는 받지 않는다 — 버퍼를 못 정한다.
   const int size = http.getSize();
   if (size <= 44 || size > (int)NAME_VOICE_BUF_MAX) {
     http.end();
-    Serial.printf("[이름소리] %s 크기가 이상하다 (%d바이트)\n", key, size);
+    Serial.printf("[이름소리] %s 크기가 이상하다 (%d바이트)\n", tag, size);
     return -1;
   }
   uint8_t *buf = (uint8_t *)ps_malloc((size_t)size);
@@ -1444,19 +1439,156 @@ static int voiceGet(const char *key) {
   http.end();
   if (got != (size_t)size || !soundWavOk(buf, got)) {
     free(buf);
-    Serial.printf("[이름소리] %s %s (%u/%d바이트)\n", key,
+    Serial.printf("[이름소리] %s %s (%u/%d바이트)\n", tag,
                   got != (size_t)size ? "중간에 끊김" : "틀 수 없는 꼴", (unsigned)got, size);
     return -1;
   }
-  if (!soundStoreName(key, buf, got)) {  // 일꾼이 앞의 것을 쓰는 중 — 부른 쪽이 그때를 피한다
+  *out = buf;
+  *outLen = got;
+  return code;
+}
+#endif
+
+// 이름 소리 하나 — 대기 때 하나씩 받아 소리 일꾼에게 넘기면 일꾼이 SD 의 /09 에 쓴다
+// (SD 는 일꾼만 만진다 — sound.h). 한 개 30KB 쯤 · https 로 1초 안쪽.
+// 돌려주는 값: 200 이면 넘겼다, 404 면 서버가 내줄 것이 없다(다음 이름표까지 묻지 않는다),
+// 그 밖(503·끊김·꼴이 틀림)은 잠시 쉬었다 다음 이름으로 — 그 이름은 다음 이름표 때 다시 묻는다.
+static int voiceGet(const char *key) {
+#if !(NAME_VOICE_ENABLE && SOUND_ENABLE)
+  (void)key;
+  return 0;
+#else
+  char url[160];
+  snprintf(url, sizeof(url), "%s/api/talent/voice/device/%s.wav", TALENT_SERVER, key);
+  const uint32_t t0 = millis();
+  uint8_t *buf;
+  size_t len;
+  const int code = wavGet(url, key, &buf, &len);
+  if (code != HTTP_CODE_OK) return code;
+  if (!soundStoreName(key, buf, len)) {  // 일꾼이 앞의 것을 쓰는 중 — 부른 쪽이 그때를 피한다
     free(buf);
     return -1;
   }
-  Serial.printf("[이름소리] %s 받았다 (%dKB · %lums)\n", key, size / 1024,
+  Serial.printf("[이름소리] %s 받았다 (%uKB · %lums)\n", key, (unsigned)(len / 1024),
                 (unsigned long)(millis() - t0));
   return code;
 #endif
 }
+
+#if NAME_VOICE_ENABLE && SOUND_ENABLE && VOICE_PACK_ENABLE
+// ── 고정 토막 판 (5단계) ─────────────────────────────────────────
+// 서버(talentVoicePack.js)가 문구 · 숫자 토막 128개를 이름 소리와 **같은 목소리로** 만들어 '판'
+// 이름(16진 8자)을 붙여 둔다. SD 의 /voice.ver 와 다르면 대기 때 하나씩 받아 /NN/NNN.wav 를
+// 그 자리에서 갈아 끼우고, 다 받으면 /voice.ver 를 쓴다. 그래서 목소리를 바꾸려면 서버만
+// 고치면 된다 — SD 를 빼서 복사할 일이 없고, 빈 카드도 저절로 채워진다.
+//   · 받기 시작할 때 /voice.ver 를 먼저 지운다 — 다 받기 전에 끊기면(전원) 다음에 켰을 때
+//     판이 달라 보여 처음부터 다시 받는다(받는 동안 몇 분은 두 목소리가 섞인다).
+//   · 받는 도중 서버의 판이 바뀌면 토막 주소가 404 다 → 그 자리에서 다시 묻는다.
+//   · 서버가 아직 만드는 중이면(202) 잠시 뒤 다시 묻는다. 이름 소리를 꺼 두었으면(404) 한참 뒤에.
+// 이름 소리 받기는 판을 다 받은 뒤에 한다(같은 쓰기 칸을 쓴다 · 빈 카드에서는 고정 토막이 먼저다).
+static uint16_t *packFiles = nullptr;  // 폴더 * 1000 + 번호 (PSRAM)
+static int packCount = 0, packIdx = 0;
+static char packVerSrv[9] = "";
+static bool packActive = false;   // 받는 중
+static bool packCleared = false;  // 이번 판을 받으며 /voice.ver 를 지웠다
+static uint32_t packCheckAt = 0;  // 다음에 서버에 판을 물을 때
+
+// 서버에 판을 묻는다. 받을 것이 있으면 packActive 를 세운다.
+static void packCheck() {
+  char url[160];
+  snprintf(url, sizeof(url), "%s/api/talent/voice/pack", TALENT_SERVER);
+  const int code = httpGet(url);
+  if (code != HTTP_CODE_OK) {
+    http.end();
+    if (code == 202) {
+      packCheckAt = millis() + VOICE_PACK_BUILDING_MS;
+      Serial.println("[고정토막] 서버가 판을 만드는 중 — 잠시 뒤 다시 묻는다");
+    } else if (code == 404) {
+      packCheckAt = millis() + VOICE_PACK_CHECK_MS;  // 서버에서 꺼 두었다 — SD 의 것을 그대로
+    } else {
+      packCheckAt = millis() + NAME_VOICE_BACKOFF_MS;
+      Serial.printf("[고정토막] 판 묻기 실패 code=%d\n", code);
+    }
+    return;
+  }
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, *http.getStreamPtr());
+  http.end();
+  packCheckAt = millis() + VOICE_PACK_CHECK_MS;
+  const char *ver = doc["ver"] | "";
+  JsonArrayConst files = doc["files"].as<JsonArrayConst>();
+  if (err || strlen(ver) != 8 || files.isNull()) {
+    Serial.printf("[고정토막] 판 응답을 못 읽었다 %s\n", err ? err.c_str() : "(ver·files 없음)");
+    return;
+  }
+  char have[9];
+  soundPackVer(have, sizeof(have));
+  if (!strcmp(have, ver)) {
+    Serial.printf("[고정토막] SD 가 서버와 같은 판 %s\n", ver);
+    return;
+  }
+  if (!packFiles) packFiles = (uint16_t *)ps_malloc(sizeof(uint16_t) * VOICE_PACK_MAX);
+  if (!packFiles) return;
+  int n = 0;
+  for (JsonVariantConst f : files) {
+    // '01/001' — 폴더 01~08 · 번호 001~255 만 받는다(이름 폴더 09 는 판에 없다)
+    const char *t = f | "";
+    unsigned folder, track;
+    if (strlen(t) != 6 || sscanf(t, "%2u/%3u", &folder, &track) != 2 || folder < 1 || folder > 8 ||
+        track < 1 || track > 255)
+      continue;
+    if (n >= VOICE_PACK_MAX) break;
+    packFiles[n++] = (uint16_t)(folder * 1000 + track);
+  }
+  if (!n) return;
+  strlcpy(packVerSrv, ver, sizeof(packVerSrv));
+  packCount = n;
+  packIdx = 0;
+  packCleared = false;
+  packActive = true;
+  packCheckAt = millis();  // 위에서 한 시간 뒤로 미뤄 둔 것을 되돌린다 — 다음 고리부터 받는다
+  Serial.printf("[고정토막] 새 판 %s (SD 는 %s) — %d개를 대기 때 하나씩 받는다\n", ver,
+                have[0] ? have : "없음", n);
+}
+
+// 대기 때 한 걸음 — 판 이름 지우기 · 토막 하나 · 판 이름 쓰기 가운데 하나. 일꾼이 쓰는 중이면 부르지 않는다.
+static void packStep() {
+  if (!packCleared) {
+    packCleared = soundStorePackVer("");
+    return;
+  }
+  if (packIdx >= packCount) {
+    if (soundStorePackVer(packVerSrv)) {
+      packActive = false;
+      Serial.printf("[고정토막] 판 %s 다 받았다 (%d개)\n", packVerSrv, packCount);
+    }
+    return;
+  }
+  const unsigned folder = packFiles[packIdx] / 1000, track = packFiles[packIdx] % 1000;
+  char url[192], tag[16];
+  snprintf(url, sizeof(url), "%s/api/talent/voice/pack/%s/%02u/%03u.wav", TALENT_SERVER, packVerSrv,
+           folder, track);
+  snprintf(tag, sizeof(tag), "%02u/%03u", folder, track);
+  uint8_t *buf;
+  size_t len;
+  const int code = wavGet(url, tag, &buf, &len);
+  if (code == HTTP_CODE_OK) {
+    if (soundStoreClip((uint8_t)folder, (uint8_t)track, buf, len)) {
+      packIdx++;
+      if (packIdx % 20 == 0 || packIdx == packCount)
+        Serial.printf("[고정토막] %d/%d\n", packIdx, packCount);
+    } else {
+      free(buf);
+    }
+  } else if (code == 404) {
+    packActive = false;  // 그사이 판이 바뀌었다 — 처음부터 다시 묻는다
+    packCheckAt = millis();
+    Serial.println("[고정토막] 판이 바뀌었다 — 다시 묻는다");
+  } else {
+    packCheckAt = millis() + NAME_VOICE_BACKOFF_MS;  // 같은 토막부터 잠시 뒤에
+  }
+}
+#endif
 
 // TALENT_SERVER("https://host[:port]") 에서 호스트·포트·ssl 을 떼어 낸다.
 static bool hubTarget(char *host, size_t cap, uint16_t *port, bool *ssl) {
@@ -3051,6 +3183,13 @@ void loop() {
                         want ? "" : " (이름표에 snd 가 없다 — 서버의 TALENT_VOICE 를 보세요)");
         }
 #endif
+#if NAME_VOICE_ENABLE && SOUND_ENABLE && VOICE_PACK_ENABLE
+        if (packActive)
+          Serial.printf("[고정토막] 서버의 판 %s 받는 중 %d/%d\n", packVerSrv, packIdx, packCount);
+        else
+          Serial.printf("[고정토막] 다음에 판을 묻기까지 %ld초\n",
+                        (long)max<int32_t>(0, (int32_t)(packCheckAt - millis()) / 1000));
+#endif
         ledReport();
         // 일꾼 스택에서 **한 번도 안 쓰고 남은** 바이트. 0 에 가까우면 넓혀야 한다.
         Serial.printf("[상태] nfc 일꾼 스택 여유 %u bytes (잡은 것 4096)\n",
@@ -3218,6 +3357,22 @@ void loop() {
   }
 #endif
 
+#if NAME_VOICE_ENABLE && SOUND_ENABLE && VOICE_PACK_ENABLE
+  // 고정 토막 판 — 사진을 다 받은 뒤에, 이름 소리보다 먼저. 대기 화면 · 한 고리에 한 걸음.
+  // 받는 중이 아니면 VOICE_PACK_CHECK_MS 마다 서버에 판을 묻는다(켠 뒤 처음은 곧바로).
+  if (online && mode == MODE_IDLE && !pendingUidWaiting() && !nfcPresentWanted &&
+#if PHOTO_CACHE_MAX > 0
+      photoPrefetchIdx >= rosterCount &&
+#endif
+      soundNamesReady() && !soundStoreBusy() && (int32_t)(millis() - packCheckAt) >= 0) {
+    if (packActive) packStep();
+    else packCheck();
+  }
+  const bool packBusy = packActive;
+#else
+  [[maybe_unused]] const bool packBusy = false;
+#endif
+
 #if NAME_VOICE_ENABLE && SOUND_ENABLE
   // 이름 소리 미리 받아 두기 — 사진을 다 받은 뒤에(사진이 눈에 먼저 띈다) 한 개씩.
   // 사진과 같이 **대기 화면 · 한 번에 하나**. SD 에 이미 있는 키는 받지 않고 지나간다 —
@@ -3227,7 +3382,7 @@ void loop() {
 #if PHOTO_CACHE_MAX > 0
       photoPrefetchIdx >= rosterCount &&
 #endif
-      voicePrefetchIdx < rosterCount && soundNamesReady() && !soundStoreBusy() &&
+      !packBusy && voicePrefetchIdx < rosterCount && soundNamesReady() && !soundStoreBusy() &&
       (int32_t)(millis() - voiceRetryAt) >= 0) {
     for (int skipped = 0; voicePrefetchIdx < rosterCount && skipped < 64; skipped++) {
       const char *key = roster[voicePrefetchIdx].snd;
