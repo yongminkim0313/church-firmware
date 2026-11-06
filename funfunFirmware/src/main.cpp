@@ -2,10 +2,11 @@
 //
 // 보드: ESP32-S3-N16R8 · GC9A01 240×240 원형 IPS(SPI) · PN532(SPI)
 // nfcProject/master 의 기능을 이 하드웨어에 옮긴 것이다. 다른 점만 먼저 적는다:
-//   · 사진이 없다 — 화면은 **글자만**으로 그린다(microSD 도 없어 사진을 둘 곳도 없다).
+//   · 사진은 96 동그라미 하나다(서버의 240 을 줄인다) — microSD 가 없어 PSRAM 에 미리 받아 둔다.
 //   · 리더가 이 보드에 직접 붙어 있다 — 참고 기기는 리더가 딴 보드라 선(I2C)·ESP-NOW 로
 //     받아 왔지만, 여기서는 PN532 를 직접 읽는다. 그 두 길은 넣지 않았다.
-//   · 터치가 없다 — 보드의 BOOT 버튼으로 대신한다(짧게: 대기 화면 · 길게: 설정 받기).
+//   · 화면 터치가 없다 — 보드의 BOOT 버튼으로 대신한다(짧게: 대기 화면·다음 장 · 길게: 설정 받기).
+//     남는 GPIO 하나를 정전식 터치 자리로 쓴다 — 손을 대면 BOOT 짧게와 같다(touchService).
 //   · 소리가 난다 — DFPlayer Mini(YX5200)가 미리 구워 둔 토막을 이어 읽는다.
 //     읽을 수 있는 말과 못 읽는 말, SD 짜임새는 sound.h 머리말에 있다.
 //   · 상태 불이 있다 — 보드에 달린 RGB LED 한 알을 빨강·노랑·초록으로 쓴다. 화면은
@@ -13,10 +14,20 @@
 //     색이 무엇을 뜻하는지는 led.h 머리말에 있다.
 //
 // ── 화면 네 가지 ──────────────────────────────────────────────────
-//   대기   : 금색 고리가 돌며 "카드를 올려 주세요". 아래에 연결 상태를 한 줄로.
-//   NFC    : 이름(큰 글씨) · 지금 기분 · 안내문 · 잔여 포인트. NFC_SHOW_MS 뒤 대기로.
+//   대기   : 홈(home.h — 등록 인원 · 총 포인트 · 오늘 +/-) 뒤로 네 장이 돌아간다(pages.h) —
+//            최근 내역 · 오늘 출석 · 이번 달 출석 랭킹 · 포인트 랭킹. 위 띠의 점이 몇째 장인가.
+//   NFC    : 한 장 — 96 사진 · 이름 · '지급 +5P'/'사용 -3P' · 분류·사유 · 잔액.
+//            포인트가 바뀌지 않은 조회면 가운데에 잔액, 그 아래 안내문·기분. NFC_SHOW_MS 뒤 대기로.
 //   일괄   : 관리 화면의 일괄 지급·사용 — 제목 + 받은 아이 명단을 한 화면에.
 //   상태   : 한 줄 알림(동기화·오류 등).
+//
+// ── 받기와 그리기를 겹치지 않는다 ─────────────────────────────────
+//   태그 → 와이파이로 주고받기(지급·조회·사진) → **다 끝난 뒤** 화면 한 장. 받는 동안에는
+//   화면을 건드리지 않고 상태 불만 노랗게 켠다. 전에는 받는 동안 테두리 고리를 따로 띄운
+//   일꾼이 돌며 100ms 마다 화면을 통째로(115KB) 밀어 넣었다 — 그 일꾼을 걷었다.
+//   이제 화면을 그리는 것은 본 고리(loop) 하나뿐이고, 서버 왕복도 같은 고리에서 차례로 돌아
+//   둘이 같은 순간에 일어날 수 없다. 허브로 밀려온 알림도 그 자리에서 그리지 않고
+//   (콜백 안이다) 깃발만 세워 loop 의 같은 자리(presentNfc)에서 받기 → 그리기로 간다.
 //
 // ── 태그는 세 갈래로 온다 ─────────────────────────────────────────
 //   PN532     이 보드에 붙은 리더가 읽는다(주된 길).
@@ -59,8 +70,8 @@
 // ── 시리얼 명령 (115200) ──────────────────────────────────────────
 //   ★ 보드의 USB-C 두 구멍 가운데 **'USB'(네이티브)** 쪽에 꽂아야 글자가 보인다.
 //     'UART'(CH343) 쪽은 굽기만 되고 조용하다 — 까닭은 platformio.ini 에.
-//   h 대기 화면 · c 설정 받기 · i 상태 · t 시험 화면 · g 고리 3초 · w 와이파이 다시
-//   s 최근 출석 목록 · v 소리 토막 하나씩 · l 상태 불 색 하나씩 · r 재부팅 · ? 도움말
+//   h 대기 화면 · g 대기 다음 장 · u 터치 값 · c 설정 받기 · i 상태 · t 시험 화면 · w 와이파이 다시
+//   {…} 알림 JSON 한 줄(ws·허브와 같은 글자) · m 메모리 전부 · s 최근 출석 목록 · v 소리 토막 하나씩 · l 상태 불 색 하나씩 · r 재부팅 · ? 도움말
 // ─────────────────────────────────────────────────────────────────
 
 #include <Adafruit_PN532.h>
@@ -75,8 +86,13 @@
 #include <WebSocketsServer.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <esp_heap_caps.h>
+#include <esp_memory_utils.h>  // esp_ptr_external_ram — 화면 버퍼가 PSRAM 에 있나
 
 #include "config.h"
+#include "emoji.h"       // '지금 기분' 이모티콘 그림(열 개) — tools/mkemoji.py 가 만든다
+#include "characters.h"  // '지금 기분' 캐릭터 그림(마흔 개) — tools/mkchars.py 가 만든다
+#include "creds.h"  // 아는 와이파이 목록(폰으로 넣은 것 [+ 구울 때 넣은 것])
 #include "led.h"
 #include "sound.h"
 
@@ -121,7 +137,7 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 // 대기 화면을 다시 그리는 주기. 전에는 루프마다 그려(루프가 그만큼 길어졌다) 밖에서
 // 보낸 것에 답하는 데까지 55ms 단위로 끊겼다. 고리는 1.5초에 한 바퀴라 이 정도로도
 // 충분히 매끄럽다.
-#define IDLE_FRAME_MS 100
+#define IDLE_FRAME_MS 1000  // 홈의 서명을 견주는 주기(그리는 것은 바뀔 때만 — drawIdle)
 
 // 들고 있는 연결을 살려 두는 주기. nginx 는 한참 조용하면 끊는다(기본 75초) — 끊기면
 // 쉬었다 처음 태깅하는 아이가 핸드셰이크 값(~525ms)을 다시 치른다. 아이들은 띄엄띄엄
@@ -140,6 +156,9 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 #define COL_GOLD RGB565(255, 200, 60)
 #define COL_DIM RGB565(120, 120, 130)
+#define COL_GIVE RGB565(90, 220, 120)   // 지급
+#define COL_USE RGB565(255, 140, 60)    // 사용
+#define COL_UNDO RGB565(150, 150, 160)  // 되돌림(관리자가 내역을 지웠다)
 #define TEXT_MARGIN 10  // 원 테두리에서 띄울 여백
 
 // 글자 크기 — 240 화면이라 참고 기기(480)의 절반쯤으로 잡았다
@@ -154,24 +173,21 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 static const uint32_t NFC_SHOW_MS = 6000;  // NFC 화면을 보여 준 뒤 대기로 돌아가는 시간
 
 // ── 사진 ─────────────────────────────────────────────────────────
-// 서버가 주는 그림은 TALENT_PX 정사각 RGB565(리틀엔디안)이고, 원 밖은 비침색이다.
-// ESP32 도 리틀엔디안이라 받은 바이트를 그대로 화면 버퍼로 읽으면 된다.
+// 서버가 주는 그림은 TALENT_PX(240) 정사각 RGB565(리틀엔디안)이고, 동그라미 밖은 비침색이다.
+// ESP32 도 리틀엔디안이라 받은 바이트를 그대로 읽으면 된다. 받으면서 PHOTO_PX(96)로 줄여 담는다.
 #define TRANSPARENT_KEY 0xF81F   // 서버 talentArt.js 의 TRANSPARENT_KEY 와 같은 값(자홍)
-#define PHOTO_SCALE (TALENT_PX / 240)  // 480 이면 2 (이웃 점 고르기로 줄인다), 240 이면 1
 
-// NFC 화면 글자 자리 — 사진을 깔기 때문에 흐르지 않고 **고정**이다. 위(이름·기분)와
-// 아래(안내문·잔액)에만 글자를 두고 가운데는 비워 둔다 — 얼굴이 가려지지 않게.
-#define NAME_CY 46
-#define MOOD_CY 74
-#define NOTE_CY 168
-#define POINTS_CY 198
-#define UID_CY 222
-// 글자가 사진 위에서 묻히지 않게 어둡게 깔 띠
-#define BAND_TOP_Y0 26
-#define BAND_TOP_Y1 90
-#define BAND_BOT_Y0 154
-#define BAND_BOT_Y1 234
-#define BAND_KEEP 80  // 앞(사진)색 비중 0~255. 낮을수록 더 어둡다
+// NFC 화면(한 장) 자리 — 위에서 아래로 사진 · 이름 · 큰 줄 · 작은 줄 둘 · UID.
+// 둥근 화면이라 아래로 갈수록 좁다 — 긴 줄은 drawUTF8 이 배수를 줄이고 fitEllipsis 가 자른다.
+//   큰 줄   포인트가 바뀌었으면 '지급 +5P' · '사용 -3P' · '되돌림 -5P', 아니면 잔액 '1,205 P'
+//   작은 줄 바뀌었으면 '분류 · 사유' 와 '잔액 1,205 P', 아니면 안내문과 기분
+// ★ 사진을 96 으로 키우며 UID 줄을 뺐다 — 원 아래쪽(y 226 언저리)은 폭이 80px 남짓이라
+//   잔액 줄까지가 한계다. 미등록 키링은 이름 자리에 UID 가 뜬다(showNfc).
+#define CARD_PHOTO_CY 60   // 96 사진의 가운데 (y 12..108) — 큰 원 안에 통째로 든다(50+48 ≤ 120)
+#define CARD_NAME_CY 128
+#define CARD_MAIN_CY 164
+#define CARD_SUB_CY 194
+#define CARD_SUB2_CY 216
 
 // ── 이름표 (UID → 사진 파일 이름) ────────────────────────────────
 // 사진 이름은 /feed 응답에 없고 /roster 에만 있다(서버 쪽 규칙 — /feed·/roster 응답을
@@ -179,30 +195,42 @@ static const uint32_t NFC_SHOW_MS = 6000;  // NFC 화면을 보여 준 뒤 대�
 // 그 img 로 사진 한 장만 받는다. 이름표는 ROSTER_TTL_MS 마다 다시 받는다 —
 // 아이가 사진을 바꾸면 img 이름이 달라져 그때 새 사진을 받게 된다.
 #define ROSTER_UID_LEN 24
-#define ROSTER_IMG_LEN 80  // "nm-<base64url(이름) 최대 64자>-480.565" 가 들어갈 크기
+#define ROSTER_IMG_LEN 80  // "nm-<base64url(이름) 최대 64자>-240.565" 가 들어갈 크기
 struct RosterRow {
-  char uid[ROSTER_UID_LEN];
+  char uid[ROSTER_UID_LEN];  // NFC UID — 카드가 없는 아이는 빈 값
+  char sid[ROSTER_UID_LEN];  // 학번 — 허브는 카드 없는 아이를 학번으로 보낸다(talentFeed.showLog)
   char img[ROSTER_IMG_LEN];
 };
-static RosterRow *roster = nullptr;  // PSRAM 에 잡는다(400칸 = 약 41KB)
+static RosterRow *roster = nullptr;  // PSRAM 에 잡는다(400칸 = 약 51KB)
 static int rosterCount = 0;
 static bool rosterGotOnce = false;
 static uint32_t rosterNextAt = 0;
+// 관리 화면에서 사진·이름이 바뀌면 서버가 {"state":"roster"} 를 민다 — 주기(10분)를
+// 기다리지 않고 다음 대기 때 받는다. 받는 콜백 위에서 https 를 돌리지 않는 것은 cfgWanted 와 같다.
+static volatile bool rosterWanted = false;
+// 홈 숫자(GET /api/talent/summary) — 주기와 '포인트가 바뀌었다' 깃발
+static uint32_t summaryNextAt = 0;
+static bool summaryWanted = false;
+// 대기 화면 네 장의 알림판(GET /api/talent/signage + /feed) — 주기와 '포인트가 바뀌었다' 깃발
+static uint32_t boardNextAt = 0;
+static bool boardWanted = false;
 // 사진을 미리 받아 둔 데까지. 이름표를 다시 받으면 0 으로 돌려 처음부터 훑는다.
 static int photoPrefetchIdx = 0;
 
 // ── 사진 캐시 (PSRAM, 가장 오래 안 쓴 것부터 밀어낸다) ───────────
-// 한 장이 240*240*2 = 115,200바이트다. 칸은 필요할 때 한 장씩 잡는다 —
-// 아이가 열 명인데 6.9MB 를 미리 묶어 두지 않는다.
-#define PHOTO_BYTES ((size_t)240 * 240 * 2)
+// 줄여 담은 한 장이 96*96*2 = 18,432바이트다. 칸은 필요할 때 한 장씩 잡는다.
+#define PHOTO_BYTES ((size_t)PHOTO_PX * PHOTO_PX * 2)
+#define SRC_BYTES ((size_t)TALENT_PX * TALENT_PX * 2)  // 서버가 주는 원본(240 → 115,200바이트)
 #if PHOTO_CACHE_MAX > 0
 struct PhotoCacheEntry {
   char img[ROSTER_IMG_LEN];  // 열쇠 — 사진 파일 이름(해시가 들어 있어 '있다 = 최신')
-  uint16_t *px;              // PSRAM 의 240x240 RGB565 (비침색 그대로 담는다)
+  uint16_t *px;              // PSRAM 의 96x96 RGB565 (비침색 그대로 담는다)
   uint32_t usedAt;           // 마지막으로 쓴 시각 — 밀어낼 칸을 고르는 데 쓴다
   bool valid;                // 끝까지 받은 것만 true. 받다 만 것은 내보내지 않는다
 };
-static PhotoCacheEntry photoCache[PHOTO_CACHE_MAX];
+// 칸 표 자체도 PSRAM 에 둔다(setup 에서 잡는다) — 400칸이면 36KB 라, 내부 RAM 에 두면
+// TLS 가 쓸 자리를 그만큼 빼앗는다(mbedTLS 는 내부 RAM 만 쓴다).
+static PhotoCacheEntry *photoCache = nullptr;
 static int photoCacheSlots = 0;  // 지금까지 PSRAM 자리를 잡은 칸 수
 static uint32_t photoHit = 0, photoMiss = 0;
 #endif
@@ -250,8 +278,19 @@ static char nfcNote[64] = "";   // 서버가 보내는 거절 안내가 들어�
 // 폰트에 이모티콘 글리프가 없어 😀 가 그대로 오면 네모(두부)가 뜬다.
 // '기쁨 오늘 소풍 가요' 처럼 label 과 text 를 이어 둔 꼴이다. 비어 있으면 그 줄을 안 그린다.
 static char nfcMood[160] = "";
+static char nfcMoodEmoji[32] = "";  // 그 기분의 이모티콘 · 캐릭터(":hamster-surprise:" 18자) — 그림이 있으면 사진에 스티커로 붙인다
+static char nfcMoodText[128] = "";  // 아이가 적은 말만(이모티콘 이름 없이)
 // 이 화면에 깔 사진의 파일 이름(이름표에서 찾은 것). 비어 있으면 글자만 그린다.
 static char nfcImg[ROSTER_IMG_LEN] = "";
+// 이번 태그로 바뀐 포인트 — +면 지급, -면 사용, 0 이면 바뀌지 않은 조회다.
+static long nfcDelta = 0;
+static bool nfcUndo = false;    // 되돌림(관리자가 내역을 지웠다) — 허브로만 온다
+static char nfcWhy[64] = "";    // '분류 · 사유'. 비어 있으면 '포인트 지급' 처럼 대신 적는다
+// 화면 상태는 정해 두었고 **아직 그리지 않았다** — loop 의 presentNfc 가 받을 것(사진)을
+// 마저 받은 뒤 그린다. 허브 콜백 안에서 서버를 부르지 않으려는 것이기도 하다.
+static bool nfcPresentWanted = false;
+// 그린 뒤 이만큼 띄운다. 시험('t' · 'd')은 들여다보라고 늘린다.
+static uint32_t nfcHoldMs = NFC_SHOW_MS;
 
 static char bulkHeadline[48] = "";
 static char bulkNames[BULK_NAMES_MAX][BULK_NAME_LEN];
@@ -343,21 +382,19 @@ static TaskHandle_t nfcTaskHandle = nullptr;
 
 // 지금 기분 한 벌
 struct Mood {
-  char line[160];  // label + text 를 이어 둔 것(화면에 그릴 한 줄)
+  char line[160] = "";  // label + text 를 이어 둔 것(상태 알림·로그 — 이모티콘 그림이 없을 때 화면에도)
+  char emoji[32] = "";  // 서버가 보낸 이모티콘 · 캐릭터 그대로(status.emoji · 가장 긴 것 18자) — 그림(emoji.h)을 찾는 열쇠
+  char text[128] = "";  // 아이가 적은 말만(status.text) — 그림을 띄울 때 아래 줄에는 이것만
 };
 
-// ── 그림 자리 다툼 막기 ──────────────────────────────────────────
-// 참고 기기는 RGB 패널이라 PSRAM 프레임버퍼를 아무 때나 찔러도 됐다. 이 보드는 SPI 로
-// 한 장(115KB)을 밀어 넣는 방식이라, 고리를 돌리는 일꾼과 본 고리가 같이 밀면 화면이
-// 깨진다. 그래서 화면 한 장을 그리는 동안은 자물쇠를 쥔다.
-static SemaphoreHandle_t gfxLock;
-#define GFX_LOCK() xSemaphoreTake(gfxLock, portMAX_DELAY)
-#define GFX_UNLOCK() xSemaphoreGive(gfxLock)
+// ── 화면은 본 고리 하나만 그린다 ─────────────────────────────────
+// 전에는 서버를 기다리는 동안 테두리 고리를 돌리는 일꾼이 따로 있어 자물쇠(gfxLock)로
+// 번갈아 그렸다. 그 일꾼이 받는 동안 화면을 밀어 넣던 것이라 걷었고(머리말 '받기와 그리기를
+// 겹치지 않는다'), 그리는 쪽이 하나뿐이니 자물쇠도 함께 걷었다.
+// ★ 다른 일꾼(nfcTask 등)에서 gfx 를 부르지 말 것 — 다시 자물쇠가 필요해진다.
 
-// spinWant 는 고리 일꾼이 읽는다 — volatile 로 둬야 컴파일러가 가두지 않는다.
-// spinDepth 는 본 고리에서만 세므로(spinStart·spinStop) volatile 이 아니다.
-static volatile bool spinWant = false;
-static int spinDepth = 0;
+// 서버를 부르는 동안 상태 불을 노랗게 — 겹쳐 불러도 맨 바깥이 끝날 때 끈다(본 고리에서만 센다).
+static int busyDepth = 0;
 
 // ── 백라이트 ─────────────────────────────────────────────────────
 // 서버가 주는 밝기는 1~16 이다. PWM 듀티로 옮긴다(1 이어도 보이게 바닥을 둔다).
@@ -574,55 +611,42 @@ static void drawAscii(const char *s, int cy, uint8_t size, uint16_t color) {
   gfx->print(s);
 }
 
-// 두 색을 섞는다(a = 앞색 비중 0~255). 띠를 반투명 검정처럼 덮는 데 쓴다.
-static inline uint16_t blend565(uint16_t fg, uint16_t bg, uint8_t a) {
-  const uint8_t r1 = (fg >> 11) & 0x1F, g1 = (fg >> 5) & 0x3F, b1 = fg & 0x1F;
-  const uint8_t r2 = (bg >> 11) & 0x1F, g2 = (bg >> 5) & 0x3F, b2 = bg & 0x1F;
-  const uint16_t r = (r1 * a + r2 * (255 - a)) / 255;
-  const uint16_t g = (g1 * a + g2 * (255 - a)) / 255;
-  const uint16_t b = (b1 * a + b2 * (255 - a)) / 255;
-  return (r << 11) | (g << 5) | b;
-}
-
-// 화면 버퍼의 한 가로 띠를 어둡게 만든다 — 글자가 사진 위에서 잘 보이게.
-static void darkenBand(int y0, int y1, uint8_t keep) {
-  uint16_t *fb = gfx->getFramebuffer();
-  if (!fb) return;
-  if (y0 < 0) y0 = 0;
-  if (y1 > 240) y1 = 240;
-  for (int y = y0; y < y1; y++) {
-    uint16_t *row = fb + (int32_t)y * 240;
-    for (int x = 0; x < 240; x++) row[x] = blend565(row[x], 0x0000, keep);
-  }
-}
-
 // 이름표에서 이 UID 의 사진 이름을 찾는다. 서버는 UID 를 대문자로 다듬어 두지만
 // (normUid), 들고 있는 값이 어떻든 맞도록 대소문자를 가리지 않고 견준다.
+// 카드가 없는 아이는 허브가 UID 자리에 학번을 보내므로 학번으로도 찾는다.
 static const char *rosterImgFor(const char *uid) {
   if (!roster || !uid || !uid[0]) return "";
   for (int i = 0; i < rosterCount; i++) {
     if (!strcasecmp(roster[i].uid, uid)) return roster[i].img;
   }
+  for (int i = 0; i < rosterCount; i++) {
+    if (!strcasecmp(roster[i].sid, uid)) return roster[i].img;
+  }
   return "";
 }
 
-// 캐시(또는 막 받은) 사진을 화면 버퍼에 깐다. 비침색인 점은 건너뛴다 — 그 자리는
-// 바탕(검정)이 그대로 남아 둥근 테두리 밖이 지저분해지지 않는다.
-// 둘 다 240x240 한 줄씩 나란한 꼴이라 번호를 그대로 견준다.
-static void blitPhoto(const uint16_t *src, int rows) {
+// 사진(PHOTO_PX)을 화면 버퍼의 (x0, y0) 에 깐다. 비침색인 점은 건너뛴다 — 그 자리는 바탕이
+// 그대로 남아 동그라미 밖이 네모로 지저분해지지 않는다.
+static void blitPhoto(const uint16_t *src, int x0, int y0) {
   uint16_t *fb = gfx->getFramebuffer();
   if (!fb || !src) return;
-  if (rows > 240) rows = 240;
-  const int32_t n = (int32_t)rows * 240;
-  for (int32_t i = 0; i < n; i++) {
-    const uint16_t c = src[i];
-    if (c != TRANSPARENT_KEY) fb[i] = c;
+  for (int y = 0; y < PHOTO_PX; y++) {
+    const int fy = y0 + y;
+    if (fy < 0 || fy >= 240) continue;
+    const uint16_t *row = src + y * PHOTO_PX;
+    uint16_t *out = fb + (int32_t)fy * 240;
+    for (int x = 0; x < PHOTO_PX; x++) {
+      const int fx = x0 + x;
+      if (fx < 0 || fx >= 240) continue;
+      if (row[x] != TRANSPARENT_KEY) out[fx] = row[x];
+    }
   }
 }
 
 #if PHOTO_CACHE_MAX > 0
 // 이 사진이 캐시에 온전히 들어 있나 — 있으면 쓴 시각을 갱신해 돌려준다.
 static uint16_t *photoCacheGet(const char *img) {
+  if (!photoCache) return nullptr;
   for (int i = 0; i < photoCacheSlots; i++) {
     if (photoCache[i].valid && !strcmp(photoCache[i].img, img)) {
       photoCache[i].usedAt = millis();
@@ -636,6 +660,7 @@ static uint16_t *photoCacheGet(const char *img) {
 // 오래 안 쓴 칸을 밀어낸다. 돌려준 칸은 아직 valid 가 아니다 — 끝까지 받은 뒤에 세운다.
 // 자리를 못 잡으면 nullptr(그때는 캐시 없이 화면에 바로 그린다).
 static uint16_t *photoCacheClaim(const char *img) {
+  if (!photoCache) return nullptr;  // 칸 표를 못 잡았다(setup) — 캐시 없이 돈다
   int slot = -1;
 
   for (int i = 0; i < photoCacheSlots; i++) {  // 같은 사진 칸이 있으면 그 자리를 다시 쓴다
@@ -709,6 +734,7 @@ static void photoCacheReport() {
                 live, PHOTO_CACHE_MAX, photoCacheSlots,
                 (unsigned)((size_t)photoCacheSlots * PHOTO_BYTES / 1024), (unsigned long)photoHit,
                 (unsigned long)photoMiss, (unsigned long)(ESP.getFreePsram() / 1024));
+  if (live > 20) return;  // 이름표 전원을 들고 있어 수백 줄이 된다 — 적을 때만 늘어놓는다
   const uint32_t nowMs = millis();
   for (int i = 0; i < photoCacheSlots; i++) {
     if (!photoCache[i].valid) continue;
@@ -718,154 +744,170 @@ static void photoCacheReport() {
 }
 #endif
 
-// 사진 받아 깔기는 서버와 말하는 쪽(httpSend·Spinner)이 아래에 있어 거기에 둔다.
-static bool drawPhoto(const char *img);
-
 static void drawRing(uint16_t color) {
   gfx->drawCircle(CX, CY, R - 1, color);
   gfx->drawCircle(CX, CY, R - 2, color);
 }
 
-// ── 불러오는 중 고리 ─────────────────────────────────────────────
-// 서버에 무엇을 물을 때(조회·출석·설정) 화면 테두리를 금색 고리가 돈다. 따로 띄운
-// 일꾼이 그린다 — 서버 왕복이 loop 를 붙잡고 있는 동안에도 돌아간다.
-// 캔버스에 이미 그려 둔 화면 위에 고리만 덧그리고 밀어 넣는다(자물쇠로 본 고리와 번갈아).
-static void spinnerTask(void *) {
-  int deg = 0;
-  for (;;) {
-    if (!spinWant) {
-      vTaskDelay(pdMS_TO_TICKS(50));
-      continue;
-    }
-    GFX_LOCK();
-    // 자물쇠를 기다리는 동안 고리가 멈췄을 수 있다 — 그러면 그리지 않는다.
-    // (안 보면 본 고리가 마지막으로 그린 화면 위에 고리가 남는다)
-    if (!spinWant) {
-      GFX_UNLOCK();
-      continue;
-    }
-    gfx->fillArc(CX, CY, R - 2, R - 7, 0, 360, RGB565_BLACK);  // 지난 자리 지우기
-    gfx->fillArc(CX, CY, R - 2, R - 7, deg, deg + 70, COL_GOLD);
-    gfx->flush();
-    GFX_UNLOCK();
-    // 한 칸을 크게, 드물게 — 고리는 폭 5픽셀인데 flush() 는 늘 화면을 통째로
-    // (115,200바이트) 밀어 넣는다(Arduino_Canvas 에 일부만 밀어 넣는 길이 없다).
-    // 40ms 마다면 초당 2.88MB 로 SPI 를 절반 넘게 쓰는데, 바로 그때 사진을 내려받고
-    // 있다 — 고리가 자기가 기다리는 다운로드를 늦추고 있었다. 각속도는 거의 그대로
-    // 둔다(15도/40ms ≒ 36도/100ms).
-    deg = (deg + 36) % 360;
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-}
-
-static void spinStart() {
-  spinDepth++;
-  spinWant = true;
-  ledBusy(true);  // 고리가 도는 동안 = 상태 불이 노란 동안
-}
-
-static void spinStop() {
-  if (spinDepth > 0) spinDepth--;
-  if (spinDepth == 0) {
-    spinWant = false;
-    ledBusy(false);
-  }
-}
-
-// 서버를 부르는 함수들이 들고 다니는 고리. 함수가 어디로 돌아가도 반드시 멈춘다.
-// on 이 false 면 아무것도 하지 않는다 — 사진을 미리 받아 둘 때처럼 화면에 보일 일이
-// 없는 왕복에서는 고리를 돌리지 않는다(돌리면 대기 화면에 뜬금없이 뜬다).
-struct Spinner {
+// ── 서버를 부르는 동안 ───────────────────────────────────────────
+// 서버를 부르는 함수들이 들고 다니는 표시. 함수가 어디로 돌아가도 반드시 끈다.
+// 화면에는 아무것도 그리지 않는다 — 상태 불만 노랗게 켠다(머리말 '받기와 그리기를
+// 겹치지 않는다'). 아이에게는 리더에 대자마자 불이 노래지는 것이 '읽었다' 는 신호다.
+// on 이 false 면 아무것도 하지 않는다 — 사진을 미리 받아 둘 때처럼 아이가 기다리지 않는
+// 왕복에서는 불을 켜지 않는다(켜면 대기 중에 불이 뜬금없이 깜빡인다).
+struct Busy {
   const bool on;
-  explicit Spinner(bool on_ = true) : on(on_) {
-    if (on) spinStart();
+  explicit Busy(bool on_ = true) : on(on_) {
+    if (on && busyDepth++ == 0) ledBusy(true);
   }
-  ~Spinner() {
-    if (on) spinStop();
+  ~Busy() {
+    if (on && busyDepth > 0 && --busyDepth == 0) ledBusy(false);
   }
 };
 
 // ── 화면들 ───────────────────────────────────────────────────────
-// 연결 상태 한 줄 — 와이파이·허브·출석모드를 한눈에
-static void statusLine(char *out, size_t cap) {
-  snprintf(out, cap, "%s %s %s", online ? "wifi" : "WIFI-", hubUp ? "hub" : "hub-",
-           cfgAttendMode ? (cfgAttendCard[0] ? "attend" : "attend?") : "");
-}
+#include "home.h"   // 홈(대기) 화면 — 시안을 옮긴 그림은 거기에
+#include "pages.h"  // 홈 뒤로 돌아가는 네 장 — 최근 내역 · 오늘 출석 · 출석 랭킹 · 포인트 랭킹
 
-// 다시 그릴 시각. drawIdle() 을 어디서 불러도 여기서 갱신되므로 부르는 쪽마다 따로
+// 대기 화면에 지금 띄운 장과, 다음 장으로 넘길 시각
+static IdlePage idlePage = PAGE_HOME;
+static uint32_t pageNextAt = 0;
+
+// 다시 볼 시각. drawIdle() 을 어디서 불러도 여기서 갱신되므로 부르는 쪽마다 따로
 // 챙기지 않아도 된다(loop 는 이 값만 본다).
 static uint32_t idleNextAt = 0;
+static uint32_t homeSig = 0;  // 마지막으로 그린 홈의 서명 — 같으면 다시 그리지 않는다
 
-static void drawIdle() {
+// 홈(대기) 화면. force 가 아니면 **바뀐 것이 있을 때만** 그린다 — 분 · 와이파이 · 숫자.
+// 예전 대기 화면은 고리를 돌리느라 100ms 마다 화면 전체(115KB)를 밀어 넣었다. 이제 화면이
+// 거의 멈춰 있으니 1초에 한 번 서명만 견주고, 그리는 것은 대개 1분에 한 번이다.
+static void drawIdle(bool force = true) {
   idleNextAt = millis() + IDLE_FRAME_MS;
-  const float angle = fmodf(millis() / 1500.0f, 1.0f) * 360.0f;
 
-  GFX_LOCK();
-  gfx->fillScreen(RGB565_BLACK);
-  drawRing(RGB565_DARKSLATEGREY);
-  gfx->fillArc(CX, CY, R - 8, R - 14, angle, angle + 70, RGB565_CYAN);
+  char t[8] = "--:--";
+  struct tm now;
+  const bool haveTime = getLocalTime(&now, 0);  // NTP 를 아직 못 받았으면 기다리지 않고 false
+  if (haveTime) snprintf(t, sizeof(t), "%d:%02d", now.tm_hour, now.tm_min);
 
-  drawUTF8("카드를 올려 주세요", 104, PX_NAME, RGB565_WHITE);
+  uint32_t sig = 2166136261u;  // FNV-1a — 홈에 보이는 값을 다 섞는다
+  auto mix = [&](uint32_t v) { sig = (sig ^ v) * 16777619u; };
+  mix(haveTime ? (uint32_t)(now.tm_hour * 60 + now.tm_min) : 0xFFFF);
+  mix(online);
+  mix(homeData.ok);
+  mix((uint32_t)homeData.members);
+  mix((uint32_t)homeData.total);
+  mix((uint32_t)homeData.earn);
+  mix((uint32_t)homeData.spend);
+  mix((uint32_t)rosterMembers);
+#if PAGES_ENABLE
+  mix(idlePage);
+  if (idlePage != PAGE_HOME) {  // 그 장의 숫자 — 받을 때마다 통째로 memset 하고 채워 바이트째 섞어도 된다
+    const uint8_t *b = (const uint8_t *)&pagesData;
+    for (size_t i = 0; i < sizeof(pagesData); i++) mix(b[i]);
+  }
+#endif
+  if (!force && sig == homeSig) return;
+  homeSig = sig;
 
-  char st[48];
-  statusLine(st, sizeof(st));
-  drawAscii(st, 142, 1, COL_DIM);
-
-  char cnt[24];
-  snprintf(cnt, sizeof(cnt), "reads %lu", (unsigned long)readCount);
-  drawAscii(cnt, 162, 1, RGB565_DARKGREY);
+#if PAGES_ENABLE
+  pageDraw(idlePage, t, online);
+#else
+  homeDraw(t, online);
+#endif
   gfx->flush();
-  GFX_UNLOCK();
 }
 
-// NFC 화면 — 사진을 깔고 그 위에 이름·기분·안내문·잔액을 얹는다.
-// 글자 자리가 고정인 까닭: 사진을 가리지 않게 위·아래에만 두고 가운데(얼굴)를 비워 둔다.
-// 사진을 받는 데 1초쯤 걸려 그동안 고리가 돌아야 하므로, 자물쇠는 **마지막에만** 쥔다
-// (화면 버퍼에 점을 쓰는 일끼리는 겹치지 않는다 — 부딪히는 것은 패널로 밀어 넣는 쪽이다).
-static void drawNfc() {
+// 작은 줄 하나 — 원 폭에 안 들어가면 뒤를 '...' 로 자른다.
+static void drawSmallLine(const char *s, int cy, uint16_t color) {
+  if (!s || !s[0]) return;
+  char buf[192];
+  strlcpy(buf, s, sizeof(buf));
+  fitEllipsis(buf, sizeof(buf), cy);
+  drawUTF8(buf, cy, PX_NOTE, color);
+}
+
+// '지금 기분' 이모티콘 스티커 — 흰 동그라미 위에 32 그림. 그림의 가장자리는 흰 바탕에 섞어
+// 구웠다(emoji.h). 비침색은 건너뛴다 — 동그라미 밖으로 네모가 나오지 않게.
+static void drawMoodBadge(const uint16_t *art, int cx, int cy) {
+  gfx->fillCircle(cx, cy, EMOJI_PX / 2 + 3, RGB565_WHITE);
+  gfx->drawCircle(cx, cy, EMOJI_PX / 2 + 3, RGB565_DARKGREY);
+  uint16_t *fb = gfx->getFramebuffer();
+  if (!fb) return;
+  const int x0 = cx - EMOJI_PX / 2, y0 = cy - EMOJI_PX / 2;
+  for (int y = 0; y < EMOJI_PX; y++) {
+    const int fy = y0 + y;
+    if (fy < 0 || fy >= 240) continue;
+    for (int x = 0; x < EMOJI_PX; x++) {
+      const int fx = x0 + x;
+      if (fx < 0 || fx >= 240) continue;
+      const uint16_t c = art[y * EMOJI_PX + x];  // ESP32 는 플래시가 주소에 비쳐 그대로 읽힌다
+      if (c != TRANSPARENT_KEY) fb[fy * 240 + fx] = c;
+    }
+  }
+}
+
+// NFC 화면 — 한 장. 사진(96) · 이름 · 지급/사용 포인트 · 사유 · 잔액.
+// ★ 여기서는 **서버를 부르지 않는다.** 사진은 presentNfc 가 미리 손에 쥐여 준다(photo).
+//   받기가 다 끝난 뒤에 화면 버퍼를 채우고 한 번에 밀어 넣는다.
+static void drawNfc(const uint16_t *photo) {
+  const bool changed = nfcDelta != 0 || nfcUndo;
+  const uint16_t tone = nfcUndo ? COL_UNDO : (nfcDelta > 0 ? COL_GIVE : COL_USE);
+
   gfx->fillScreen(RGB565_BLACK);
-  const bool hasPhoto = drawPhoto(nfcImg);
+  drawRing(changed ? tone : (nfcKnown ? RGB565_FORESTGREEN : COL_GOLD));
 
-  if (hasPhoto) {
-    darkenBand(BAND_TOP_Y0, BAND_TOP_Y1, BAND_KEEP);
-    darkenBand(BAND_BOT_Y0, BAND_BOT_Y1, BAND_KEEP);
+  // 사진 — 없으면(미등록 키링·이름표를 못 받았다) 빈 동그라미 테만 둔다
+  const int px0 = CX - PHOTO_PX / 2, py0 = CARD_PHOTO_CY - PHOTO_PX / 2;
+  if (photo) {
+    blitPhoto(photo, px0, py0);
+  } else {
+    gfx->drawCircle(CX, CARD_PHOTO_CY, PHOTO_PX / 2 - 1, RGB565_DARKGREY);
   }
+  gfx->drawCircle(CX, CARD_PHOTO_CY, PHOTO_PX / 2 + 1, changed ? tone : RGB565_DARKSLATEGREY);
+  gfx->drawCircle(CX, CARD_PHOTO_CY, PHOTO_PX / 2 + 2, changed ? tone : RGB565_DARKSLATEGREY);
 
-  GFX_LOCK();
-  // 사진이 없으면 테두리 안쪽을 채워 빈 화면이 덜 허전하게 둔다
-  if (!hasPhoto) {
-    gfx->fillArc(CX, CY, R - 8, R - 14, 0, 360,
-                 nfcKnown ? RGB565_DARKGREEN : RGB565_DARKORANGE);
-  }
-  drawRing(nfcKnown ? RGB565_FORESTGREEN : COL_GOLD);
+  // 지금 기분 — 그림이 있는 이모티콘이면 사진 오른쪽 아래에 스티커로(앱의 사진 위 기분과 같은 자리).
+  // 포인트가 바뀐 화면에서도 보인다. 이모티콘도 캐릭터(':bear-love:')도 아니면(목록 밖)
+  // 아래 줄에 이름으로 쓴다.
+  const uint16_t *moodArt = emojiArtOf(nfcMoodEmoji);
+  if (!moodArt) moodArt = characterArtOf(nfcMoodEmoji);
+  if (moodArt) drawMoodBadge(moodArt, CX + 38, CARD_PHOTO_CY + 30);
 
-  drawUTF8(nfcName[0] ? nfcName : nfcUid, NAME_CY, PX_NAME, RGB565_WHITE);
+  drawUTF8(nfcName[0] ? nfcName : nfcUid, CARD_NAME_CY, PX_NAME, RGB565_WHITE);
 
-  // 기분은 이름 아래. 적어 둔 것이 없으면 그 줄을 그리지 않는다.
-  if (nfcMood[0]) {
-    char mood[160];
-    strlcpy(mood, nfcMood, sizeof(mood));
-    fitEllipsis(mood, sizeof(mood), MOOD_CY);
-    drawUTF8(mood, MOOD_CY, PX_MOOD, COL_GOLD);
-  }
-
-  // 안내문 — '출석 완료 +5P' · '이미 출석했어요' · '등록되지 않은 키링' 등
-  drawUTF8(nfcNote[0] ? nfcNote : "잔여 포인트", NOTE_CY, PX_NOTE,
-           nfcNote[0] ? RGB565_CYAN : COL_DIM);
-
-  char pts[24], line[32];
+  char pts[24], line[64];
   commafy(nfcPoints, pts, sizeof(pts));
-  snprintf(line, sizeof(line), "%s P", pts);
-  drawUTF8(line, POINTS_CY, PX_POINTS, COL_GOLD);
 
-  drawAscii(nfcUid, UID_CY, 1, RGB565_DARKGREY);
+  if (changed) {
+    // '지급 +5P' · '사용 -3P' · '되돌림 -5P'
+    char amt[24];
+    commafy(nfcDelta < 0 ? -nfcDelta : nfcDelta, amt, sizeof(amt));
+    snprintf(line, sizeof(line), "%s %s%sP", nfcUndo ? "되돌림" : (nfcDelta > 0 ? "지급" : "사용"),
+             nfcDelta < 0 ? "-" : "+", amt);
+    drawUTF8(line, CARD_MAIN_CY, PX_POINTS, tone);
+
+    // 사유 — 서버가 분류·사유를 비워 보냈으면 무엇이 일어났는지라도 적는다
+    const char *why = nfcWhy[0] ? nfcWhy : (nfcUndo ? "내역을 되돌렸어요" : (nfcDelta > 0 ? "포인트 지급" : "포인트 사용"));
+    drawSmallLine(why, CARD_SUB_CY, RGB565_WHITE);
+
+    snprintf(line, sizeof(line), "잔액 %s P", pts);
+    drawUTF8(line, CARD_SUB2_CY, PX_NOTE, COL_GOLD);
+  } else {
+    // 바뀐 것이 없는 조회 — 가운데에 잔액, 그 아래 안내문('이미 출석했어요' · 거절 까닭 ·
+    // '등록되지 않은 키링')과 지금 기분
+    snprintf(line, sizeof(line), "%s P", pts);
+    drawUTF8(line, CARD_MAIN_CY, PX_POINTS, COL_GOLD);
+    drawSmallLine(nfcNote[0] ? nfcNote : "잔여 포인트", CARD_SUB_CY,
+                  nfcNote[0] ? RGB565_CYAN : COL_DIM);
+    // 그림을 붙였으면 이름('생각')은 빼고 아이가 적은 말만
+    drawSmallLine(moodArt ? nfcMoodText : nfcMood, CARD_SUB2_CY, COL_GOLD);
+  }
+
   gfx->flush();
-  GFX_UNLOCK();
 }
 
 // 일괄 화면 — 제목 + 명단. 240 에는 몇 줄밖에 안 들어가니 나머지는 "외 N명" 으로.
 static void drawBulk() {
-  GFX_LOCK();
   gfx->fillScreen(RGB565_BLACK);
   drawRing(COL_GOLD);
 
@@ -883,12 +925,10 @@ static void drawBulk() {
     drawUTF8(more, firstY + shown * lineH, PX_BULK_NAME, COL_GOLD);
   }
   gfx->flush();
-  GFX_UNLOCK();
 }
 
 // 한 줄 알림 (동기화·오류 등)
 static void drawStatus(const char *msg) {
-  GFX_LOCK();
   gfx->fillScreen(RGB565_BLACK);
   drawRing(COL_DIM);
   char line[96];
@@ -896,17 +936,14 @@ static void drawStatus(const char *msg) {
   fitEllipsis(line, sizeof(line), CY);
   drawUTF8(line, CY, PX_NOTE, RGB565_WHITE);
   gfx->flush();
-  GFX_UNLOCK();
 }
 
 static void drawFatal(const char *line1, const char *line2) {
-  GFX_LOCK();
   gfx->fillScreen(RGB565_BLACK);
   drawRing(RGB565_RED);
   drawUTF8(line1, 100, 24, RGB565_RED);
   drawUTF8(line2, 132, PX_NOTE, COL_DIM);
   gfx->flush();
-  GFX_UNLOCK();
 }
 
 // ── 상태 알림 (붙은 쪽에게) ──────────────────────────────────────
@@ -948,18 +985,50 @@ static void sendState(int8_t only = -1) {
   if (hubUp) hub.sendTXT(msg);
 }
 
+// 대기 화면의 다음 장으로 — 받은 것이 없는 장은 건너뛴다(홈은 늘 있다).
+static void pageAdvance() {
+#if PAGES_ENABLE
+  int p = idlePage;
+  for (int k = 0; k < PAGE_COUNT; k++) {
+    p = (p + 1) % PAGE_COUNT;
+    if (pageHasData((IdlePage)p)) break;
+  }
+  idlePage = (IdlePage)p;
+  pageNextAt = millis() + (idlePage == PAGE_HOME ? PAGE_HOME_MS : PAGE_MS);
+  drawIdle(false);  // 넘길 장이 홈뿐이면(알림판을 아직 못 받았다) 다시 그리지 않는다 — 서명이 같다
+#endif
+}
+
 static void goIdle(bool announce = true) {
 #if SOUND_SAY_IDLE
   // 들어올 때만 부른다 — drawIdle() 은 1.5초마다 다시 그리므로 거기 두면 쉬지 않고 떠든다.
   if (mode != MODE_IDLE) soundSay(SND_IDLE_PROMPT);
 #endif
   mode = MODE_IDLE;
+  nfcPresentWanted = false;  // 그리려던 NFC 화면이 있었으면 접는다(단추로 대기로 돌렸다)
+  idlePage = PAGE_HOME;      // 대기로 돌아오면 홈부터 — 방금 바뀐 포인트가 홈에 먼저 보인다
+  pageNextAt = millis() + PAGE_HOME_MS;
   drawIdle();
   if (announce) sendState();
 }
 
+// 사진 한 장을 손에 쥔다(캐시에 없으면 받는다) — 서버와 말하는 쪽이 아래에 있어 거기 둔다.
+static const uint16_t *photoGet(const char *img, bool forTag);
+static void memLine();  // 메모리 한 줄 — 아래 '메모리 기록'
+
+// 이번 화면의 포인트 변화 — 지급·사용이 아니면 delta 0 으로 부른다.
+struct Change {
+  long delta = 0;
+  bool undo = false;
+  const char *why = "";  // '분류 · 사유'
+};
+
+// 화면 상태를 정하고 소리·불을 건다. **그리는 것은 presentNfc** 다(loop 가 곧 부른다).
+// 세 갈래(리더·ws·허브)가 모두 이 함수를 지난다 — 허브·ws 는 받는 콜백 안이라 여기서
+// 서버(사진)를 부를 수 없고, 리더 쪽도 받기를 다 끝낸 뒤 그리도록 한 자리로 모은다.
 static void showNfc(const char *uid, const char *name, long points, bool known,
-                    const char *note = "", const Mood *mood = nullptr) {
+                    const char *note = "", const Mood *mood = nullptr,
+                    const Change &chg = Change()) {
   copyJsonSafe(nfcUid, sizeof(nfcUid), uid);
   // 이름·안내문도 copyJsonSafe 로 받는다 — 관리 화면(브라우저)이 직접 보내 올 수 있어
   // 이름에 따옴표가 섞이면 상태 알림의 JSON 이 그 자리에서 깨진다. 글자 경계에서
@@ -967,22 +1036,43 @@ static void showNfc(const char *uid, const char *name, long points, bool known,
   copyJsonSafe(nfcName, sizeof(nfcName), (name && name[0]) ? name : uid);
   copyJsonSafe(nfcNote, sizeof(nfcNote), note);
   copyJsonSafe(nfcMood, sizeof(nfcMood), mood ? mood->line : "");
+  strlcpy(nfcMoodEmoji, mood ? mood->emoji : "", sizeof(nfcMoodEmoji));
+  strlcpy(nfcMoodText, mood ? mood->text : "", sizeof(nfcMoodText));
   nfcPoints = points;
   nfcKnown = known;
+  nfcDelta = chg.delta;
+  nfcUndo = chg.undo;
+  copyJsonSafe(nfcWhy, sizeof(nfcWhy), chg.why);
   // 이 아이의 사진 이름. 이름표에 없으면(미등록 카드이거나 이름표를 못 받았다) 빈 값이고
-  // 그때는 글자만 그린다.
+  // 그때는 사진 자리에 빈 테만 둔다.
   strlcpy(nfcImg, rosterImgFor(nfcUid), sizeof(nfcImg));
 
+  // 대기 화면 다시 그리기를 여기서 멈춘다(mode) — 그리는 것은 presentNfc.
   mode = MODE_NFC;
-  nfcUntil = millis() + NFC_SHOW_MS;
-  // 그리기보다 **먼저** 읽힌다 — drawNfc() 는 사진을 받느라 1초쯤 loop 를 붙잡는데,
-  // 모듈은 한 번 틀어 주면 혼자 읽으므로 그동안 첫 토막이 흐른다.
-  // 세 갈래(리더·ws·허브)가 모두 이 함수를 지나므로 소리를 거는 자리도 여기 하나다.
+  nfcHoldMs = NFC_SHOW_MS;
+  nfcUntil = millis() + NFC_SHOW_MS + HTTP_TIMEOUT_MS;  // presentNfc 가 그린 때부터 다시 잰다
+  nfcPresentWanted = true;
+  // 소리는 그리기보다 **먼저** 건다 — 모듈은 한 번 틀어 주면 혼자 읽으므로(UART 몇 바이트)
+  // 사진을 마저 받는 동안 첫 토막이 흐른다. 화면과 겹칠 것이 없다.
   soundSayNote(nfcNote, nfcPoints);
-  // 불도 여기 하나에서 고른다 — 세 갈래(리더·ws·허브)가 모두 이 함수를 지난다.
-  // 화면이 접히는 때(nfcUntil)와 같은 시각에 바탕색으로 내려온다.
+  // 불도 여기 하나에서 고른다. 화면이 접히는 때와 같은 시각에 바탕색으로 내려온다.
   ledTag(nfcNote, nfcKnown, NFC_SHOW_MS);
-  drawNfc();
+}
+
+// 정해 둔 NFC 화면을 그린다 — **받을 것을 다 받은 뒤에.**
+// 사진은 대개 미리 받아 둔 것이라(loop 의 미리 받기) 서버를 치지 않는다. 캐시에 없을
+// 때만(막 등록한 아이·이름표를 막 다시 받았다) 여기서 한 장(4.6KB)을 받고 나서 그린다.
+static void presentNfc() {
+  nfcPresentWanted = false;
+  const uint32_t t0 = millis();
+  const uint16_t *photo = photoGet(nfcImg, true);  // 받기 — 여기까지가 와이파이
+  drawNfc(photo);                                   // 그리기 — 여기부터는 화면뿐
+  if (nfcDelta || nfcUndo) summaryWanted = true;     // 홈의 총 포인트·오늘 +/- 가 바뀌었다
+  nfcUntil = millis() + nfcHoldMs;
+  Serial.printf("[화면] %s %+ldP%s · 사진 %s (%lums)\n", nfcName, nfcDelta, nfcUndo ? " 되돌림" : "",
+                photo ? "있음" : (nfcImg[0] ? "못 받음" : "이름표에 없음"),
+                (unsigned long)(millis() - t0));
+  memLine();  // 태깅 한 번(서버 왕복 + 그리기) 뒤의 메모리
   sendState();
 }
 
@@ -1002,6 +1092,8 @@ static void showBulk(const char *headline, JsonVariantConst names) {
   if (!bulkCount) return;
 
   mode = MODE_BULK;
+  nfcPresentWanted = false;  // 같은 바퀴에 먼저 온 개별 알림이 있었으면 일괄이 덮는다
+  summaryWanted = true;      // 홈 숫자가 바뀌었다
   uint32_t dur = BULK_SHOW_BASE_MS + (uint32_t)bulkCount * BULK_SHOW_PER_NAME_MS;
   if (dur > BULK_SHOW_MAX_MS) dur = BULK_SHOW_MAX_MS;
   nfcUntil = millis() + dur;
@@ -1010,32 +1102,52 @@ static void showBulk(const char *headline, JsonVariantConst names) {
   sendState();
 }
 
-// 시험 화면 — 카드도 서버도 없이 NFC 화면을 띄운다(글자 크기·자리를 눈으로 보려고).
+// 시험 화면 — 카드 없이 NFC 화면을 띄운다(글자 크기·자리를 눈으로 보려고).
 // 시리얼 't' 를 누를 때마다 다음 보기로 넘어가고, 한 번 띄우면 1분 동안 그대로 둔다.
+// 사진은 이름표의 아이 것을 차례로 빌려 쓴다(받아 둔 것이 없으면 그 자리에서 한 장 받는다).
 static void showTestScreen() {
   static const struct {
     const char *name;
     long points;
     const char *note;
     const char *mood;
+    long delta;
+    bool undo;
+    const char *why;
   } SAMPLES[] = {
-      {"홍길동", 1205, "출석 완료 +5P", "기쁨 오늘 소풍 가요"},
-      {"김영민", 0, "", ""},
-      {"박하늘별님구름햇님보다사랑스러우리", 12345, "", "신남 생일이에요"},
-      {"이서준", 50, "이미 출석했어요", "피곤 어제 늦게 잤어요 그래서 조금 졸려요"},
-      {"", 0, "등록되지 않은 키링", ""},
+      {"홍길동", 1205, "출석 완료 +5P", "기쁨 오늘 소풍 가요", 5, false, "출석"},
+      {"김영민", 340, "-30P 간식", "", -30, false, "간식, 컵라면 하나랑 음료수 두 개 샀어요"},
+      {"박하늘별님구름햇님보다사랑스러우리", 12345, "+1000P", "", 1000, false, ""},
+      {"최유나", 95, "+5P 되돌림", "", -5, true, ""},
+      {"이서준", 50, "이미 출석했어요", "생각 어제 늦게 잤어요 그래서 조금 졸려요", 0, false, ""},
+      {"", 0, "등록되지 않은 키링", "", 0, false, ""},
   };
+  static const int N = (int)(sizeof(SAMPLES) / sizeof(SAMPLES[0]));
   static int idx = 0;
 
   const auto &s = SAMPLES[idx];
-  Serial.printf("[시험] %d/%d  %s · %ld P · %s · %s\n", idx + 1,
-                (int)(sizeof(SAMPLES) / sizeof(SAMPLES[0])), s.name, s.points, s.note, s.mood);
+  Serial.printf("[시험] %d/%d  %s · %ld P · %+ldP · %s · %s\n", idx + 1, N, s.name, s.points,
+                s.delta, s.why, s.note);
   Mood m;
   strlcpy(m.line, s.mood, sizeof(m.line));
-  showNfc("TEST0001", s.name, s.points, s.name[0] != '\0', s.note, &m);
-  nfcImg[0] = '\0';  // 시험 화면은 사진 없이 — 글자 자리만 본다
-  nfcUntil = millis() + 60000;  // 6초면 들여다볼 새가 없다
-  idx = (idx + 1) % (int)(sizeof(SAMPLES) / sizeof(SAMPLES[0]));
+  // 기분이 있는 보기는 그 첫 낱말(이름)에 맞는 이모티콘을 붙여 본다 — '기쁨 오늘 소풍 가요' → 😀
+  for (const EmojiArt &e : EMOJI_ARTS) {
+    const size_t n = strlen(e.label);
+    if (!strncmp(s.mood, e.label, n) && (s.mood[n] == ' ' || !s.mood[n])) {
+      strlcpy(m.emoji, e.utf8, sizeof(m.emoji));
+      strlcpy(m.text, s.mood[n] ? s.mood + n + 1 : "", sizeof(m.text));
+      break;
+    }
+  }
+  Change chg;
+  chg.delta = s.delta;
+  chg.undo = s.undo;
+  chg.why = s.why;
+  showNfc("TEST0001", s.name, s.points, s.name[0] != '\0', s.note, &m, chg);
+  // 등록된 보기에만 사진을 빌려 단다(미등록 보기는 빈 테 그대로)
+  strlcpy(nfcImg, (s.name[0] && rosterCount) ? roster[idx % rosterCount].img : "", sizeof(nfcImg));
+  nfcHoldMs = 60000;  // 6초면 들여다볼 새가 없다
+  idx = (idx + 1) % N;
 }
 
 // ── 서버 ─────────────────────────────────────────────────────────
@@ -1127,37 +1239,50 @@ static void httpWarm() {
   http.end();
 }
 
-// ── 사진 한 장 받아 화면 버퍼에 깔기 ────────────────────────────
-// 원본은 TALENT_PX 정사각이고 원 밖은 비침색이다 — 그 점은 건너뛴다(바탕이 그대로 남는다).
-// 줄일 때는 **이웃 점 고르기**(평균 아님)를 쓴다. 평균을 내면 원 테두리에서 비침색(자홍)이
-// 진짜 색과 섞여 얼굴 둘레에 자홍 테가 생긴다.
+// ── 사진 한 장 손에 쥐기 (서버 240 → 화면 96) ─────────────────────
+// 캐시에 있으면 그것을, 없으면 받아서 캐시에 담고 돌려준다. **화면 버퍼는 건드리지 않는다**
+// — 받는 일과 그리는 일을 떼어 두려는 것이다(머리말 '받기와 그리기를 겹치지 않는다').
+// 원본은 240 정사각 RGB565(115,200바이트)이고 동그라미 밖은 비침색이다. **한 줄씩 흘려 읽으며**
+// 96 으로 줄여 담는다 — 원본을 통째로 들 자리는 필요 없다(한 줄 480바이트).
+// 줄일 때는 **이웃 점 고르기**(평균 아님)다. 평균을 내면 동그라미 테두리에서 비침색(자홍)이
+// 진짜 색과 섞여 얼굴 둘레에 자홍 테가 생긴다. 캐시에는 비침색까지 그대로 담고 깔 때 건너뛴다.
 //
-// 한 줄씩 흘려 읽는다 — 480 짜리 한 장은 460KB 라 통째로 받아 둘 자리가 없다(heap 은
-// 250KB 남짓이다). 한 줄(960바이트)만 들고 바로 화면 버퍼에 옮긴다.
-// draw 가 false 면 **화면에 깔지 않고 캐시에만 담는다** — 미리 받아 두는 길(loop 의
-// 선캐싱)이 이것을 쓴다. 그때는 고리도 돌리지 않는다.
-static bool loadPhoto(const char *img, bool draw) {
+// forTag 가 true 면 아이가 리더 앞에서 기다리는 길이다:
+//   · 받는 동안 상태 불을 노랗게 켠다.
+//   · 캐시 칸을 못 얻어도(PSRAM 이 모자라다) 임시 칸에 받아 이번 한 번은 띄운다.
+// false 면 미리 받아 두는 길(loop) — 불을 켜지 않고, 칸이 없으면 받지 않는다.
+static const uint16_t *photoGet(const char *img, bool forTag) {
 #if !PHOTO_ENABLE
-  return false;
+  return nullptr;
 #else
-  if (!img || !img[0]) return false;
-  uint16_t *fb = draw ? gfx->getFramebuffer() : nullptr;
-  if (draw && !fb) return false;
+  if (!img || !img[0]) return nullptr;
 
 #if PHOTO_CACHE_MAX > 0
   // 1) 들고 있는 사진이면 내려받지 않는다 — 와이파이가 끊겨 있어도 뜬다.
   const uint16_t *hit = photoCacheGet(img);
   if (hit) {
-    photoHit++;
-    if (draw) blitPhoto(hit, 240);
-    return true;
+    if (forTag) photoHit++;
+    return hit;
   }
-  photoMiss++;
+  if (forTag) photoMiss++;
 #endif
 
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.status() != WL_CONNECTED) return nullptr;
 
-  Spinner spin(draw);  // 받는 동안 테두리에 금색 고리가 돈다(미리 받을 때는 돌리지 않는다)
+  // 2) 받을 자리. 캐시 칸이 없으면 태그 길만 임시 칸(PSRAM 한 장)을 쓴다.
+  uint16_t *slot = nullptr;
+#if PHOTO_CACHE_MAX > 0
+  slot = photoCacheClaim(img);
+#endif
+  const bool cached = slot != nullptr;
+  if (!slot && forTag) {
+    static uint16_t *tmp = nullptr;
+    if (!tmp) tmp = (uint16_t *)ps_malloc(PHOTO_BYTES);
+    slot = tmp;
+  }
+  if (!slot) return nullptr;
+
+  Busy busy(forTag);
 
   char url[220];
   snprintf(url, sizeof(url), "%s/api/talent/photo/device/%s", TALENT_SERVER, img);
@@ -1166,114 +1291,89 @@ static bool loadPhoto(const char *img, bool draw) {
   const int code = httpGet(url);
   if (code != HTTP_CODE_OK) {
     http.end();
+#if PHOTO_CACHE_MAX > 0
+    if (cached) photoCacheDrop(slot);
+#endif
     Serial.printf("[사진] 실패 code=%d (%s)\n", code, img);
-    return false;
+    return nullptr;
   }
 
-  WiFiClient *st = http.getStreamPtr();
+  // 받을 길이가 240 정사각과 안 맞으면 바로 접는다 — 서버가 다른 크기를 이름표에 실었다
+  // (예: ?px= 를 빼먹어 서버 기본값 48 이 왔다). 그대로 읽으면 화면에 잡음만 깔린다.
   const int expect = http.getSize();  // Content-Length (모르면 -1)
-
-  // 받을 길이가 TALENT_PX 와 안 맞으면 바로 접는다. 가장 흔한 원인은 **서버가 그 크기를
-  // 모르는 것**이다 — DEVICE_SIZES 에 없는 px 를 달라고 하면 서버가 기본값(48)로 되돌려
-  // 이름표에 ph-…-48.565 를 실어 주므로, 여기서 4,608바이트가 온다. 그대로 읽으면
-  // 화면에 잡음만 깔린다. (서버에 240 을 넣었으면 TALENT_PX 를 240 으로 바꿀 것)
-  const int want = TALENT_PX * TALENT_PX * 2;
-  if (expect > 0 && expect != want) {
+  if (expect > 0 && expect != (int)SRC_BYTES) {
     http.end();
-    Serial.printf("[사진] 크기가 다르다 — 받을 길이 %d바이트, 기대 %d바이트(px %d). "
-                  "서버 DEVICE_SIZES 에 %d 이 있는지 확인하세요\n",
-                  expect, want, TALENT_PX, TALENT_PX);
-    return false;
+#if PHOTO_CACHE_MAX > 0
+    if (cached) photoCacheDrop(slot);
+#endif
+    Serial.printf("[사진] 크기가 다르다 — 받을 길이 %d바이트, 기대 %u바이트(px %d)\n", expect,
+                  (unsigned)SRC_BYTES, TALENT_PX);
+    return nullptr;
   }
 
-  // 한 줄을 다 모을 때까지 기다려 가며 읽는다.
+  // 다 모을 때까지 기다려 가며 읽는다.
   // ★ readBytes() 의 시간 끊기에만 맡기면 안 된다 — TLS 버퍼가 잠깐 비는 순간
-  //   0 이 돌아와 "끊겼다" 로 잘못 읽는다(15KB 쯤에서 멈추는 것을 실제로 봤다).
+  //   0 이 돌아와 "끊겼다" 로 잘못 읽는다(240 사진 때 15KB 쯤에서 멈추는 것을 실제로 봤다).
   //   available() 이 0 이어도 연결이 살아 있으면 아직 오는 중이다.
+  WiFiClient *st = http.getStreamPtr();
   auto fill = [&](uint8_t *dst, size_t need) -> bool {
-    size_t got = 0;
+    size_t n0 = 0;
     uint32_t idleFrom = millis();
-    while (got < need) {
+    while (n0 < need) {
       if (st->available() > 0) {
-        const int n = st->read(dst + got, need - got);
+        const int n = st->read(dst + n0, need - n0);
         if (n > 0) {
-          got += (size_t)n;
+          n0 += (size_t)n;
           idleFrom = millis();
           continue;
         }
       }
       if (!st->connected() && st->available() == 0) return false;  // 정말 끝났다
       if (millis() - idleFrom > HTTP_TIMEOUT_MS) return false;     // 너무 오래 조용하다
-      delay(1);  // 쉬는 동안 고리 일꾼이 돈다
+      delay(1);
     }
     return true;
   };
-
-  // 2) 받을 자리를 캐시에서 얻는다. 못 얻으면(캐시를 껐거나 PSRAM 이 모자라다)
-  //    예전처럼 화면 버퍼에 바로 그린다 — 캐시만 못 쓰고 동작은 그대로다.
-  uint16_t *slot = nullptr;
-#if PHOTO_CACHE_MAX > 0
-  slot = photoCacheClaim(img);
-#endif
-  // 미리 받아 두는 길은 담을 칸이 있어야 뜻이 있다 — 칸을 못 얻었으면 접는다
-  // (화면에 깔 일이 없으니 받아도 버릴 뿐이다).
-  if (!draw && !slot) {
-    http.end();
-    return false;
-  }
-
-  static uint16_t rowBuf[TALENT_PX];  // 원본 한 줄 (240이면 480바이트)
-  int rows = 0;
+  // 줄일 때 고를 원본 자리 — 칸의 가운데에 가장 가까운 점((2i+1)·240 / (2·96))
+  auto srcOf = [](int i) { return (2 * i + 1) * TALENT_PX / (2 * PHOTO_PX); };
+  static uint16_t rowBuf[TALENT_PX];  // 원본 한 줄 (480바이트)
+  size_t got = 0;
+  int dy = 0;
+  bool whole = true;
   for (int sy = 0; sy < TALENT_PX; sy++) {
     if (!fill((uint8_t *)rowBuf, sizeof(rowBuf))) {
-      http.end();
-      Serial.printf("[사진] 중간에 끊김 (%d/%d줄, 기대 %d바이트, %lums)\n", sy, TALENT_PX, expect,
-                    (unsigned long)(millis() - t0));
-      // 받은 줄까지는 보여 주지만, 캐시 칸은 못 쓰게 한다 — 반쪽 사진을
-      // 들고 있다가 다음 태깅에 그대로 내보내면 그 아이는 계속 반쪽만 본다.
-      if (slot) {
-        if (draw) blitPhoto(slot, rows);
-        photoCacheDrop(slot);
-      }
-      return rows > 0;
+      whole = false;
+      break;
     }
-    if (sy % PHOTO_SCALE) continue;  // 건너뛰는 줄
-    const int dy = sy / PHOTO_SCALE;
-    if (dy >= 240) break;
-    if (slot) {
-      // 캐시에는 **날것 그대로**(비침색까지) 담는다 — 깔 때 건너뛰면 되고,
-      // 검정으로 바꿔 담으면 나중에 사진을 무언가 위에 얹을 길이 막힌다.
-      uint16_t *out = slot + (int32_t)dy * 240;
-      for (int dx = 0; dx < 240; dx++) out[dx] = rowBuf[dx * PHOTO_SCALE];
-    } else {
-      uint16_t *out = fb + (int32_t)dy * 240;
-      for (int dx = 0; dx < 240; dx++) {
-        const uint16_t c = rowBuf[dx * PHOTO_SCALE];
-        if (c != TRANSPARENT_KEY) out[dx] = c;
-      }
+    got += sizeof(rowBuf);
+    while (dy < PHOTO_PX && srcOf(dy) == sy) {  // 이 원본 줄을 고르는 화면 줄(대개 0 또는 1줄)
+      uint16_t *out = slot + dy * PHOTO_PX;
+      for (int dx = 0; dx < PHOTO_PX; dx++) out[dx] = rowBuf[srcOf(dx)];
+      dy++;
     }
-    rows++;
   }
   http.end();
 
-  if (slot) {
+  if (!whole) {
+    // 반쪽 사진은 들고 있지 않는다 — 다음 태깅에 그대로 내보내면 그 아이는 계속 반쪽만 본다.
 #if PHOTO_CACHE_MAX > 0
-    // 끝까지 받은 것만 다음에 내보낸다(240줄을 다 채웠을 때만 온전하다고 센다)
-    if (rows >= 240) {
-      photoCacheCommit(slot);
-    } else {
-      photoCacheDrop(slot);
-    }
+    if (cached) photoCacheDrop(slot);
 #endif
-    if (draw) blitPhoto(slot, rows);
+    Serial.printf("[사진] 중간에 끊김 (%u/%u바이트, %lums)\n", (unsigned)got,
+                  (unsigned)SRC_BYTES, (unsigned long)(millis() - t0));
+    return nullptr;
   }
-  Serial.printf("[사진] %s %s (%d줄, %d바이트, %lums)\n", img, draw ? "깔았다" : "미리 받았다",
-                rows, expect, (unsigned long)(millis() - t0));
-  return rows > 0;
+#if PHOTO_CACHE_MAX > 0
+  if (cached) photoCacheCommit(slot);
+#endif
+  // 미리 받기는 수백 장이 이어지므로 한 줄씩 찍지 않는다(끝에 한 줄 — loop)
+  if (forTag) {
+    Serial.printf("[사진] %s 받았다 (%lums%s)\n", img, (unsigned long)(millis() - t0),
+                  cached ? "" : " · 캐시 칸이 없어 임시로");
+  }
+  return slot;
 #endif
 }
-
-static bool drawPhoto(const char *img) { return loadPhoto(img, true); }
 
 // TALENT_SERVER("https://host[:port]") 에서 호스트·포트·ssl 을 떼어 낸다.
 static bool hubTarget(char *host, size_t cap, uint16_t *port, bool *ssl) {
@@ -1289,15 +1389,26 @@ static bool hubTarget(char *host, size_t cap, uint16_t *port, bool *ssl) {
   return i > 0;
 }
 
+// '분류, 사유' 로 잇는다. 한쪽이 비면 다른 쪽만, 둘 다 비면 빈 문자열.
+// ★ 가운뎃점(' · ')을 쓰지 않는다 — U+00B7 이 굴림16 에 없어, 그 한 자 때문에 줄 전체가
+//   quan7(8px)로 되돌려 그려져 사유가 깨알만 해졌다(fitEllipsis 머리말과 같은 까닭).
+static void joinWhy(char *out, size_t cap, const char *category, const char *reason) {
+  category = category ? category : "";
+  reason = reason ? reason : "";
+  snprintf(out, cap, "%s%s%s", category, (category[0] && reason[0]) ? ", " : "", reason);
+}
+
 // 응답의 status 는 { emoji, label, text }. **label 만 쓴다** — emoji 는 😀 같은 날글자라
 // 이 폰트에 글리프가 없어 네모(두부)로 뜨고, label 이 그것의 한국어 이름이다.
 // 둘을 '기쁨 오늘 소풍 가요' 처럼 한 줄로 잇는다. status 가 없으면 빈 문자열.
 static void moodFromJson(JsonVariantConst status, Mood *m) {
-  m->line[0] = '\0';
+  m->line[0] = m->emoji[0] = m->text[0] = '\0';
   if (status.isNull()) return;
   const char *label = status["label"] | "";
   const char *text = status["text"] | "";
   snprintf(m->line, sizeof(m->line), "%s%s%s", label, (label[0] && text[0]) ? " " : "", text);
+  strlcpy(m->emoji, status["emoji"] | "", sizeof(m->emoji));
+  copyJsonSafe(m->text, sizeof(m->text), text);
 }
 
 // ── 서버 설정 받기 (리더 설정 → v2.0) ────────────────────────────
@@ -1305,7 +1416,7 @@ static void moodFromJson(JsonVariantConst status, Mood *m) {
 // 못 받으면 아무것도 바꾸지 않는다 — 들고 있던 값(또는 펌웨어 기본값)으로 계속 돈다.
 // 와이파이가 흔들릴 때마다 밝기가 튀거나 출석모드가 꺼지면 현장에서 더 혼란스럽다.
 static void fetchConfig() {
-  Spinner spin;
+  Busy busy;
   cfgNextAt = millis() + CONFIG_TTL_MS;
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -1366,20 +1477,23 @@ static void fetchConfig() {
 // ── 이름표 받기 (UID → 사진 파일 이름) ──────────────────────────
 // GET /api/talent/roster?px=<TALENT_PX> → { data: [ { uid, sid, name, img } ] }
 // img 는 그 아이의 기기용 그림 이름이다 — 사진이 있으면 ph-…, 없으면 이름 그림 nm-…
-// (480 에 한해). 사진 자체는 태깅할 때 한 장만 받는다(drawPhoto).
+// (240 은 이름을 크게 새긴 동그라미 — 208 에는 이름 그림이 없어 쓰지 않는다).
+// 사진 자체는 loop 가 한가할 때 한 장씩 미리 받는다.
 //
-// 이름표는 수백 줄이라 통째로 담으면 heap 이 모자란다. **uid·img 만 남기는 체를 걸어**
-// 흘려 읽는다 — name·sid 는 쓰지 않으므로 받는 즉시 버린다.
+// ?all=1 — 카드가 없는 아이까지 받는다(uid 가 빈 줄). 관리 화면에서 그 아이에게 포인트를
+// 주면 허브가 학번으로 알려 오는데, 그때도 사진이 떠야 한다.
+// 이름표는 수백 줄이라 통째로 담으면 heap 이 모자란다. **uid·sid·img 만 남기는 체를 걸어**
+// 흘려 읽는다 — name 은 쓰지 않으므로 받는 즉시 버린다.
 static bool fetchRoster() {
 #if !PHOTO_ENABLE
   return false;
 #else
-  Spinner spin;
+  Busy busy;
   rosterNextAt = millis() + ROSTER_TTL_MS;
   if (WiFi.status() != WL_CONNECTED || !roster) return false;
 
   char url[160];
-  snprintf(url, sizeof(url), "%s/api/talent/roster?px=%d", TALENT_SERVER, TALENT_PX);
+  snprintf(url, sizeof(url), "%s/api/talent/roster?px=%d&all=1", TALENT_SERVER, TALENT_PX);
 
   const uint32_t t0 = millis();
   const int code = httpGet(url);
@@ -1391,6 +1505,7 @@ static bool fetchRoster() {
 
   JsonDocument filter;
   filter["data"][0]["uid"] = true;
+  filter["data"][0]["sid"] = true;
   filter["data"][0]["img"] = true;
 
   JsonDocument doc;
@@ -1413,35 +1528,199 @@ static bool fetchRoster() {
   bool whole = true;
   for (JsonObjectConst r : data) {
     const char *uid = r["uid"] | "";
+    const char *sid = r["sid"] | "";
     const char *img = r["img"] | "";
-    if (!uid[0] || !img[0]) continue;  // 사진도 이름 그림도 없는 아이는 담지 않는다
+    if ((!uid[0] && !sid[0]) || !img[0]) continue;  // 찾을 열쇠나 그림이 없는 줄은 담지 않는다
     if (n >= MAX_ROSTER) {
       whole = false;
       break;
     }
-    if (strlen(uid) >= ROSTER_UID_LEN || strlen(img) >= ROSTER_IMG_LEN) {
+    if (strlen(uid) >= ROSTER_UID_LEN || strlen(sid) >= ROSTER_UID_LEN ||
+        strlen(img) >= ROSTER_IMG_LEN) {
       whole = false;
       continue;
     }
     strlcpy(roster[n].uid, uid, ROSTER_UID_LEN);
+    strlcpy(roster[n].sid, sid, ROSTER_UID_LEN);
     strlcpy(roster[n].img, img, ROSTER_IMG_LEN);
     n++;
   }
   rosterCount = n;
   rosterGotOnce = true;
+  // 학번 수 — 카드를 여럿 쥔 아이는 줄이 여럿이라 줄 수가 아니라 학번을 센다(홈의 등록 인원 대신)
+  rosterMembers = 0;
+  for (int i = 0; i < n; i++) {
+    if (!roster[i].sid[0]) continue;
+    bool dup = false;
+    for (int j = 0; j < i && !dup; j++) dup = !strcmp(roster[j].sid, roster[i].sid);
+    if (!dup) rosterMembers++;
+  }
   photoPrefetchIdx = 0;  // 이름표가 바뀌었으니 사진을 처음부터 다시 훑는다
-  Serial.printf("[이름표] 사진 있는 아이 %d명%s (px %d, %lums)\n", rosterCount,
+  Serial.printf("[이름표] 그림 있는 줄 %d개%s (px %d, %lums)\n", rosterCount,
                 whole ? "" : " (칸이 모자라 일부만)", TALENT_PX,
                 (unsigned long)(millis() - t0));
   return true;
 #endif
 }
 
+// ── 홈 숫자 받기 ─────────────────────────────────────────────────
+// GET /api/talent/summary → { members, totalPoints, todayEarn, todaySpend }
+// (서버 TalentManager.js — 관리 화면 머리 줄과 같은 셈). 못 받으면 들고 있던 값 그대로 —
+// 한 번도 못 받았으면 홈이 등록 인원만 이름표로 채우고 나머지는 '-' 로 둔다.
+// 아이가 기다리는 왕복이 아니라 상태 불(Busy)은 켜지 않는다.
+static void fetchSummary() {
+  summaryNextAt = millis() + SUMMARY_TTL_MS;
+  if (WiFi.status() != WL_CONNECTED) return;
+  char url[160];
+  snprintf(url, sizeof(url), "%s/api/talent/summary", TALENT_SERVER);
+  const uint32_t t0 = millis();
+  const int code = httpGet(url);
+  if (code != HTTP_CODE_OK) {
+    http.end();
+    Serial.printf("[홈] 숫자 받기 실패 code=%d%s\n", code,
+                  code == 404 ? " (서버에 /summary 가 아직 없다 — 배포 전)" : "");
+    return;
+  }
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, *http.getStreamPtr());
+  http.end();
+  if (err || !(doc["success"] | false)) {
+    Serial.println("[홈] 숫자 해석 실패");
+    return;
+  }
+  // ★ /summary 가 없는 옛 서버는 이 주소를 GET /api/talent/:sid 로 받아 'SUMMARY 라는 아이' 의
+  //   빈 잔액({success:true, uid:"SUMMARY", balance:0})을 돌려준다 — 200 이라 실패로 안 보인다.
+  //   그대로 믿으면 홈이 0명 · 0P 로 뜬다. 칸이 있는지로 가른다.
+  if (!doc["totalPoints"].is<long>()) {
+    Serial.println("[홈] 서버에 /summary 가 아직 없다(옛 서버 — 배포 전) — 숫자 없이 둔다");
+    return;
+  }
+  homeData.members = doc["members"] | 0L;
+  homeData.total = doc["totalPoints"] | 0L;
+  homeData.earn = doc["todayEarn"] | 0L;
+  homeData.spend = doc["todaySpend"] | 0L;
+  homeData.ok = true;
+  Serial.printf("[홈] 등록 %ld명 · 총 %ld P · 오늘 +%ld / -%ld (%lums)\n", homeData.members,
+                homeData.total, homeData.earn, homeData.spend, (unsigned long)(millis() - t0));
+}
+
+// ── 대기 화면 네 장의 알림판 받기 ────────────────────────────────
+// GET /api/talent/signage → { date, today:[{name}], points:[{rank,name,balance}], month:[{rank,name,count}] }
+// GET /api/talent/feed?limit=PAGE_RECENT_N → { data:[{name,delta,category,reason,agoSec}] }
+// (서버 TalentManager.js — nfcProject/singleTest 가 480 화면에 띄우는 것과 같은 창구.)
+// 못 받으면 들고 있던 것 그대로 — 한 번도 못 받은 장은 돌리지 않는다(pageHasData).
+// 홈 숫자처럼 아이가 기다리는 왕복이 아니라 상태 불(Busy)은 켜지 않는다.
+// 사진 이름(img)은 체로 걸러 버린다 — 이 화면들은 글자만 그린다.
+static void fetchBoard() {
+  boardNextAt = millis() + BOARD_TTL_MS;
+  if (WiFi.status() != WL_CONNECTED) return;
+  const uint32_t t0 = millis();
+  PagesData next;
+  memcpy(&next, &pagesData, sizeof(next));  // 한쪽만 받으면 다른 쪽은 들고 있던 것으로
+  char url[160];
+
+  // ① 알림판 — 오늘 출석 · 포인트 순위 · 이번 달 출석 순위
+  snprintf(url, sizeof(url), "%s/api/talent/signage", TALENT_SERVER);
+  int code = httpGet(url);
+  if (code != HTTP_CODE_OK) {
+    http.end();
+    Serial.printf("[알림판] 받기 실패 code=%d\n", code);
+  } else {
+    JsonDocument filter;
+    filter["date"] = true;
+    filter["today"][0]["name"] = true;
+    for (const char *k : {"points", "month"}) {
+      filter[k][0]["name"] = true;
+      filter[k][0]["rank"] = true;
+    }
+    filter["points"][0]["balance"] = true;
+    filter["month"][0]["count"] = true;
+    JsonDocument doc;
+    const DeserializationError err =
+        deserializeJson(doc, *http.getStreamPtr(), DeserializationOption::Filter(filter));
+    http.end();
+    // 이 창구를 모르는 옛 서버는 'signage' 를 학번으로 읽어(GET /:sid) 200 을 준다 — date 가 없으면 아니다
+    if (err || !doc["date"].is<const char *>()) {
+      Serial.printf("[알림판] 해석 실패%s\n", err ? "" : " (서버에 /signage 가 없다 — 배포 전)");
+    } else {
+      next.boardOk = true;
+      JsonArrayConst today = doc["today"].as<JsonArrayConst>();
+      next.todayN = today.size();
+      memset(next.today, 0, sizeof(next.today));
+      int n = 0;
+      for (JsonVariantConst r : today) {
+        if (n >= PAGE_TODAY_N) break;
+        copyJsonSafe(next.today[n++], PAGE_NAME_LEN, r["name"] | "");
+      }
+      auto fill = [](JsonArrayConst arr, PageRank *out, const char *valueKey) {
+        memset(out, 0, sizeof(PageRank) * PAGE_RANK_N);
+        int n = 0;
+        for (JsonVariantConst r : arr) {
+          if (n >= PAGE_RANK_N) break;
+          PageRank &w = out[n++];
+          copyJsonSafe(w.name, sizeof(w.name), r["name"] | "");
+          w.rank = r["rank"] | n;
+          w.value = r[valueKey] | 0L;
+        }
+        return n;
+      };
+      next.pointsN = fill(doc["points"].as<JsonArrayConst>(), next.points, "balance");
+      next.monthN = fill(doc["month"].as<JsonArrayConst>(), next.month, "count");
+      const char *date = doc["date"] | "";  // 'YYYY-MM-DD'
+      next.mon = strlen(date) >= 7 ? atoi(date + 5) : 0;
+    }
+  }
+
+  // ② 최근 내역
+  snprintf(url, sizeof(url), "%s/api/talent/feed?limit=%d", TALENT_SERVER, PAGE_RECENT_N);
+  code = httpGet(url);
+  if (code != HTTP_CODE_OK) {
+    http.end();
+    Serial.printf("[최근 내역] 받기 실패 code=%d\n", code);
+  } else {
+    JsonDocument filter;
+    for (const char *k : {"name", "delta", "category", "reason", "agoSec"}) filter["data"][0][k] = true;
+    JsonDocument doc;
+    const DeserializationError err =
+        deserializeJson(doc, *http.getStreamPtr(), DeserializationOption::Filter(filter));
+    http.end();
+    if (err || !doc["data"].is<JsonArrayConst>()) {
+      Serial.println("[최근 내역] 해석 실패");
+    } else {
+      next.recentOk = true;
+      memset(next.recent, 0, sizeof(next.recent));
+      int n = 0;
+      for (JsonVariantConst r : doc["data"].as<JsonArrayConst>()) {
+        if (n >= PAGE_RECENT_N) break;
+        PageRecent &w = next.recent[n++];
+        copyJsonSafe(w.name, sizeof(w.name), r["name"] | "");
+        char why[sizeof(w.why)];
+        joinWhy(why, sizeof(why), r["category"] | "", r["reason"] | "");
+        copyJsonSafe(w.why, sizeof(w.why), why);
+        w.delta = r["delta"] | 0L;
+        w.agoSec = r["agoSec"] | 0UL;
+      }
+      next.recentN = n;
+      pagesRecentAt = millis();
+    }
+  }
+
+  memcpy(&pagesData, &next, sizeof(next));
+  Serial.printf("[알림판] 오늘 %d명 · %d월 출석 %d줄 · 포인트 %d줄 · 최근 %d건 (%lums)\n",
+                pagesData.todayN, pagesData.mon, pagesData.monthN, pagesData.pointsN,
+                pagesData.recentN, (unsigned long)(millis() - t0));
+  // 지금 띄운 장이 비었으면(오늘 출석이 지워졌다 등) 홈으로 — 빈 장을 들고 있지 않게
+  if (mode == MODE_IDLE && !pageHasData(idlePage)) {
+    idlePage = PAGE_HOME;
+    pageNextAt = millis() + PAGE_HOME_MS;
+  }
+}
+
 // ── 이름·잔액·기분 조회 ──────────────────────────────────────────
 // GET /api/talent/feed?uid=<UID>&limit=0 → { who: { name, balance, known, status } }
 static bool lookupTalent(const char *uid, char *name, size_t nameCap, long *points, bool *known,
                          Mood *mood = nullptr) {
-  Spinner spin;
+  Busy busy;
   if (WiFi.status() != WL_CONNECTED) return false;
 
   char url[192];
@@ -1473,13 +1752,16 @@ static bool lookupTalent(const char *uid, char *name, size_t nameCap, long *poin
 }
 
 // ── 출석 지급 ────────────────────────────────────────────────────
-// POST /api/talent/earn { uid, card, device } → { name, balance, delta, status }
+// POST /api/talent/earn { uid, card, device } → { name, balance, delta, item, category, status }
+// item 은 사유(보통 비어 있다 — '비 오는 날' 같은 덧붙임만), category 는 분류('출석').
+// ★ category 는 2026-11-05 에 덧붙였다 — 그 전 서버는 싣지 않으므로 비면 '출석' 으로 둔다.
 // 금액은 보내지 않는다 — 얼마를 어떤 사유로 줄지는 서버에 등록된 그 카드가 정한다.
 // 기기는 현장에 놓인 물건이라 요청을 흉내 내기 쉬운데, 값이 서버에만 있으면 그래 봐야
 // 그 카드에 적힌 만큼만 올라간다.
 static bool attendEarn(const char *uid, char *name, size_t nameCap, long *points, long *delta,
-                       Mood *mood = nullptr, char *deny = nullptr, size_t denyCap = 0) {
-  Spinner spin;
+                       char *why, size_t whyCap, Mood *mood = nullptr, char *deny = nullptr,
+                       size_t denyCap = 0) {
+  Busy busy;
   if (WiFi.status() != WL_CONNECTED) return false;
 
   char url[160];
@@ -1516,10 +1798,12 @@ static bool attendEarn(const char *uid, char *name, size_t nameCap, long *points
   strlcpy(name, doc["name"] | "", nameCap);
   *points = doc["balance"] | 0L;
   *delta = doc["delta"] | 0L;
+  const char *cat = doc["category"] | "";
+  joinWhy(why, whyCap, cat[0] ? cat : "출석", doc["item"] | "");
   // 지급 응답도 status 를 함께 준다 — 출석모드에서는 이 한 번으로 화면을 그리므로,
   // 기분을 따로 물으면 리더 앞에 선 아이를 왕복 한 번만큼 더 기다리게 한다.
   if (mood) moodFromJson(doc["status"], mood);
-  Serial.printf("[출석] %s +%ldP → 잔액 %ld P\n", uid, *delta, *points);
+  Serial.printf("[출석] %s +%ldP (%s) → 잔액 %ld P\n", uid, *delta, why, *points);
   return true;
 }
 
@@ -1528,7 +1812,7 @@ static bool attendEarn(const char *uid, char *name, size_t nameCap, long *points
 // 이걸 부르지 않으면 화면에 "등록되지 않은 키링" 만 뜰 뿐 서버에는 기록이 남지 않아,
 // 관리자가 등록할 대상 자체가 생기지 않는다.
 static void reportSeen(const char *uid) {
-  Spinner spin;
+  Busy busy;
   if (WiFi.status() != WL_CONNECTED) return;
 
   char url[160];
@@ -1589,8 +1873,10 @@ static void listAttend() {
 }
 
 // ── 태그 한 건 처리 ──────────────────────────────────────────────
-// UID 하나로 (1) 출석모드면 지급하고 (2) 아니면 이름·잔액만 물어 (3) 화면에 띄운다.
+// UID 하나로 (1) 출석모드면 지급하고 (2) 아니면 이름·잔액만 물어 (3) 화면을 정한다.
 // loop 에서 부른다 — 서버 왕복이 있어 콜백 안에서 하지 않는다.
+// ★ 여기서는 그리지 않는다. 서버와 주고받기가 다 끝나면 showNfc 가 깃발을 세우고,
+//   loop 가 바로 이어서 presentNfc(사진 손에 쥐기 → 한 장 그리기)를 부른다.
 static void processTag(const char *uid) {
   char name[40] = "";
   Mood mood;
@@ -1611,11 +1897,17 @@ static void processTag(const char *uid) {
       }
       return;
     }
-    if (attendEarn(uid, name, sizeof(name), &points, &delta, &mood, deny, sizeof(deny))) {
+    char why[64] = "";
+    if (attendEarn(uid, name, sizeof(name), &points, &delta, why, sizeof(why), &mood, deny,
+                   sizeof(deny))) {
       rememberAttend(uid);
+      // 안내문은 소리·불이 읽는 꼴('출석 완료 +5P') 그대로 둔다 — 화면은 delta·why 로 그린다.
       char note[32];
       snprintf(note, sizeof(note), "출석 완료 +%ldP", delta);
-      showNfc(uid, name, points, true, note, &mood);
+      Change chg;
+      chg.delta = delta;
+      chg.why = why;
+      showNfc(uid, name, points, true, note, &mood, chg);
       return;
     }
     // 지급이 안 됐다 — 조회라도 해서 잔액은 띄운다. 아무 반응이 없으면 아이는
@@ -1640,6 +1932,12 @@ static void handleWord(const char *s) {
   // 다시 물어 가져간다(관리 화면이 지은 설정을 그대로 믿지 않는다).
   if (!strcmp(s, "config")) {
     cfgWanted = true;
+    return;
+  }
+  // 사진·이름이 바뀌었다 — 이름표를 다시 받아라(값은 실려 오지 않는다). 받는 것은 loop 가
+  // 대기 화면일 때 한다. 바뀐 아이의 img 이름이 달라져 그 한 장만 새로 받는다.
+  if (!strcmp(s, "roster")) {
+    rosterWanted = true;
     return;
   }
   if (!strcmp(s, "enable") || !strcmp(s, "disable") || !strcmp(s, "toggle") ||
@@ -1670,7 +1968,23 @@ static void handleCommand(const char *text, size_t len) {
         } else {
           strlcpy(m.line, doc["mood"] | "", sizeof(m.line));
         }
-        showNfc(uid, doc["name"] | "", doc["points"] | 0L, true, doc["note"] | "", &m);
+        // 포인트 변화 — 서버(talentFeed.showLog)는 note 를 '+5P 사유' · '+5P 되돌림' 으로 짓고
+        // 분류·사유를 category·reason 으로 따로 싣는다. 금액은 note 맨 앞의 수다.
+        // 되돌림의 수는 **지운 내역의** 금액이라(+5 를 지웠다) 잔액은 거꾸로 움직인다(-5).
+        const char *note = doc["note"] | "";
+        Change chg;
+        if (note[0] == '+' || note[0] == '-') chg.delta = atol(note);
+        chg.undo = strstr(note, "되돌림") != nullptr;
+        if (chg.undo) chg.delta = -chg.delta;
+        char why[64];
+        joinWhy(why, sizeof(why), doc["category"] | "", doc["reason"] | "");
+        // 옛 서버는 category·reason 이 없다 — note 의 '+5P ' 뒤를 사유로 쓴다
+        if (!why[0] && !chg.undo && chg.delta) {
+          const char *sp = strchr(note, ' ');
+          strlcpy(why, sp ? sp + 1 : "", sizeof(why));
+        }
+        chg.why = why;
+        showNfc(uid, doc["name"] | "", doc["points"] | 0L, true, note, &m, chg);
         return;
       }
       postPendingUid(uid);  // 서버 왕복은 loop 에서
@@ -1768,21 +2082,17 @@ static void hubStart() {
 #endif
 }
 
-// ── 와이파이 (우선순위 4개, config.h) ────────────────────────────
-// 0→1→2→3 순서로 붙어 본다. 한 곳에 WIFI_TRY_MS 만큼 붙어 보고 안 되면 다음 순위로,
-// 넷 다 안 되면 처음으로 돌아가 계속 반복한다. WiFi.begin() 은 기다리지 않고 바로
+// ── 와이파이 (아는 곳 목록, creds.h) ─────────────────────────────
+// 목록의 0 번부터 차례로 붙어 본다. 한 곳에 WIFI_TRY_MS 만큼 붙어 보고 안 되면 다음 순위로,
+// 다 안 되면 처음으로 돌아가 계속 반복한다. WiFi.begin() 은 기다리지 않고 바로
 // 돌아오므로 붙는 동안에도 loop 가 멈추지 않는다 — 카드를 계속 읽어야 하기 때문이다.
-struct WifiAp {
-  const char *ssid;
-  const char *pass;
-};
-static const WifiAp WIFI_APS[] = {
-    {WIFI_SSID_0, WIFI_PASS_0},
-    {WIFI_SSID_1, WIFI_PASS_1},
-    {WIFI_SSID_2, WIFI_PASS_2},
-    {WIFI_SSID_3, WIFI_PASS_3},
-};
-static const int WIFI_AP_COUNT = sizeof(WIFI_APS) / sizeof(WIFI_APS[0]);
+//
+// 목록은 이제 creds.h 가 짠다(2026-11-06) — 폰으로 넣은 것(NVS)이 앞이고, 구울 때 넣은
+// 네 벌은 config.h 의 WIFI_USE_BUILTIN 이 1 일 때만 뒤에 붙는다. 빌드할 때만 넣는 와이파이
+//   PLATFORMIO_BUILD_FLAGS='-DWIFI_SSID_OVERRIDE=\"이름\" -DWIFI_PASS_OVERRIDE=\"비번\"'
+// 는 예전처럼 **그 하나에만** 붙어 본다.
+static bool wifiEverOnline = false;  // 켠 뒤 한 번이라도 붙어 봤나(설정 모드 자동 진입 조건)
+static int wifiNoApRounds = 0;       // 목록을 다 돌아도 못 붙은 바퀴 수(붙으면 0 으로)
 
 // 한 순위에 이만큼 붙어 보고 안 되면 다음 순위로. 부팅 직후 첫 시도는 스캔부터 하느라
 // 느려서 8초로는 붙을 수 있는 AP 도 놓쳤다 — 넉넉히 준다.
@@ -1800,16 +2110,25 @@ static bool wifiParked = false;
 static uint32_t wifiParkAt = 0;
 static int wifiParkTries = 0;
 
+// ── 설정 모드 ──────────────────────────────────────────────────────
+// 여기에 끼운 까닭: 위의 화면 그리는 손(drawStatus·drawUTF8·drawRing·goIdle)과 바로 위
+// 와이파이 셈(wifiIdx·wifiTried·wifiNoApRounds), creds.h 의 목록을 그대로 쓴다.
+// loop 는 둘 중 하나만 돌린다 — 함께 돌면 라디오를 다툰다.
+#include "portal.h"
+
 static void wifiService() {
   if (WiFi.status() == WL_CONNECTED) {
     wifiParked = false;
     wifiParkTries = 0;
+    wifiNoApRounds = 0;
+    wifiEverOnline = true;
     return;
   }
+  if (wifiApCount == 0) return;  // 아는 곳이 없다 — 설정 모드가 맡는다
 
   if (wifiParked) {  // 틈을 둔 뒤 실제로 건다
     if (millis() - wifiParkAt < WIFI_SETTLE_MS) return;
-    if (WiFi.begin(WIFI_APS[wifiIdx].ssid, WIFI_APS[wifiIdx].pass) == WL_CONNECT_FAILED &&
+    if (WiFi.begin(wifiAps[wifiIdx].ssid, wifiAps[wifiIdx].pass) == WL_CONNECT_FAILED &&
         wifiParkTries < WIFI_SETTLE_MAX) {
       wifiParkTries++;  // 아직 안 빠졌다 — 틈을 더 주고 다시
       wifiParkAt = millis();
@@ -1819,13 +2138,21 @@ static void wifiService() {
     wifiParkTries = 0;
     wifiTryAt = millis();
     wifiTried = true;
-    Serial.printf("[와이파이] %d순위 '%s' 에 붙어 보는 중\n", wifiIdx + 1, WIFI_APS[wifiIdx].ssid);
+    Serial.printf("[와이파이] %d순위 '%s' 에 붙어 보는 중\n", wifiIdx + 1, wifiAps[wifiIdx].ssid);
     return;
   }
 
   if (wifiTried && millis() - wifiTryAt < WIFI_TRY_MS) return;  // 붙는 중 — 더 기다린다
 
-  if (wifiTried) wifiIdx = (wifiIdx + 1) % WIFI_AP_COUNT;  // 실패 → 다음 순위
+  if (wifiTried) {  // 실패 → 다음 순위. 처음으로 돌아왔으면 한 바퀴를 다 돈 것이다
+    wifiIdx = (wifiIdx + 1) % wifiApCount;
+    if (wifiIdx == 0) {
+      wifiNoApRounds++;
+      Serial.printf("[와이파이] 아는 곳 %d곳에 다 못 붙었다 (%d바퀴)\n", wifiApCount,
+                    wifiNoApRounds);
+    }
+  }
+  if (wifiIdx >= wifiApCount) wifiIdx = 0;
   WiFi.disconnect();
   wifiParkAt = millis();
   wifiParked = true;
@@ -1951,34 +2278,252 @@ static void nfcTask(void *) {
   }
 }
 
+// ── 메모리 기록 ──────────────────────────────────────────────────
+// 한 줄(주기 — config.h 의 MEM_LOG_MS):
+//   [메모리] 내부 남음/최저/큰덩이 | DMA 남음/큰덩이 | PSRAM 남음/최저/큰덩이 | 스택 여유 loop·nfc
+//   · 내부   mbedTLS·WiFi·WebSocket 이 쓰는 자리. **최저**가 켠 뒤 가장 바닥까지 내려간 값이다.
+//   · DMA    내부 RAM 가운데 SPI DMA 가 쓸 수 있는 자리(화면·와이파이 버퍼)
+//   · 큰덩이 한 번에 잡을 수 있는 가장 큰 덩이 — 남은 양은 넉넉한데 이것만 작으면 조각났다는 뜻
+// 전부(시리얼 'm'): 위에 더해 각 영역의 전체 크기, 이 펌웨어가 PSRAM 에 잡은 것(이름표·사진 캐시·
+//   화면 버퍼), 그리고 **모든 태스크**의 스택 여유.
+// ★ 본 고리(loop)에서만 부른다 — loop 스택 여유를 uxTaskGetStackHighWaterMark(NULL) 로 재기 때문이다.
+static unsigned kb(size_t b) { return (unsigned)((b + 512) / 1024); }
+
+static unsigned stackFree(TaskHandle_t h) {
+  return (unsigned)(uxTaskGetStackHighWaterMark(h) * sizeof(StackType_t));
+}
+
+static void memLine() {
+  Serial.printf("[메모리] 내부 %uK · 최저 %uK · 큰덩이 %uK | DMA %uK · 큰덩이 %uK | "
+                "PSRAM %uK · 최저 %uK · 큰덩이 %uK | 스택 여유 loop %u · nfc %u | %lus\n",
+                kb(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                kb(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+                kb(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                kb(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+                kb(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
+                kb(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                kb(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
+                kb(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)), stackFree(nullptr),
+                nfcTaskHandle ? stackFree(nfcTaskHandle) : 0u, (unsigned long)(millis() / 1000));
+}
+
+static void memReportAll() {
+  struct Area {
+    const char *name;
+    uint32_t caps;
+  };
+  static const Area AREAS[] = {
+      {"내부", MALLOC_CAP_INTERNAL},
+      {"DMA", MALLOC_CAP_DMA},
+      {"PSRAM", MALLOC_CAP_SPIRAM},
+  };
+  Serial.printf("[메모리] ── 전부 (켠 지 %lu초) ──\n", (unsigned long)(millis() / 1000));
+  for (const Area &a : AREAS) {
+    const size_t total = heap_caps_get_total_size(a.caps);
+    const size_t freeB = heap_caps_get_free_size(a.caps);
+    Serial.printf("  %-6s 전체 %6uK · 쓰는 중 %6uK (%2u%%) · 남음 %6uK · 최저 %6uK · 큰덩이 %6uK\n",
+                  a.name, kb(total), kb(total - freeB),
+                  total ? (unsigned)((total - freeB) * 100 / total) : 0u, kb(freeB),
+                  kb(heap_caps_get_minimum_free_size(a.caps)),
+                  kb(heap_caps_get_largest_free_block(a.caps)));
+  }
+
+  // 이 펌웨어가 잡은 큰 덩이들
+  uint16_t *fb = gfx->getFramebuffer();
+  Serial.printf("  화면 버퍼 240x240 %uK · %s\n", kb((size_t)240 * 240 * 2),
+                fb ? (esp_ptr_external_ram(fb) ? "PSRAM" : "내부") : "없음");
+  Serial.printf("  이름표   %d/%d칸 · %uK\n", rosterCount, MAX_ROSTER,
+                kb(sizeof(RosterRow) * MAX_ROSTER));
+#if PHOTO_CACHE_MAX > 0
+  int live = 0;
+  for (int i = 0; i < photoCacheSlots; i++) {
+    if (photoCache[i].valid) live++;
+  }
+  Serial.printf("  사진캐시 %d장 담김 · 자리 %d/%d칸 · 사진 %uK + 칸 표 %uK\n", live, photoCacheSlots,
+                PHOTO_CACHE_MAX, kb((size_t)photoCacheSlots * PHOTO_BYTES),
+                kb(sizeof(PhotoCacheEntry) * PHOTO_CACHE_MAX));
+#endif
+
+  // 태스크마다 스택 여유 — 한 번도 안 쓰고 남은 바이트(0 에 가까우면 넓혀야 한다)
+#if configUSE_TRACE_FACILITY
+  const UBaseType_t n = uxTaskGetNumberOfTasks();
+  TaskStatus_t *ts = (TaskStatus_t *)malloc(sizeof(TaskStatus_t) * (n + 2));
+  if (ts) {
+    const UBaseType_t got = uxTaskGetSystemState(ts, n + 2, nullptr);
+    Serial.printf("  태스크 %u개 — 이름 · 스택 여유 · 우선순위 · 코어\n", (unsigned)got);
+    for (UBaseType_t i = 0; i < got; i++) {
+#if configTASKLIST_INCLUDE_COREID
+      const int core = ts[i].xCoreID;
+#else
+      const int core = -1;
+#endif
+      Serial.printf("    %-16s %6u · %2u · %s\n", ts[i].pcTaskName,
+                    (unsigned)(ts[i].usStackHighWaterMark * sizeof(StackType_t)),
+                    (unsigned)ts[i].uxCurrentPriority,
+                    core == 0 ? "0" : core == 1 ? "1" : "-");
+    }
+    free(ts);
+  }
+#else
+  Serial.printf("  스택 여유 loop %u · nfc %u (태스크 목록은 이 빌드에서 못 본다)\n",
+                stackFree(nullptr), nfcTaskHandle ? stackFree(nfcTaskHandle) : 0u);
+#endif
+}
+
+// loop 맨 앞에서 부른다 — 주기가 됐을 때만 한 줄.
+static void memService() {
+#if MEM_LOG_MS > 0
+  static uint32_t at = 0;
+  const uint32_t now = millis();
+  if (at && now - at < MEM_LOG_MS) return;
+  at = now;
+  memLine();
+#endif
+}
+
+// 버튼 짧게 · 터치 — 대기 중이면 다음 장, NFC·일괄 화면이면 대기로
+static void nextScreen() {
+#if PAGES_ENABLE
+  if (mode == MODE_IDLE) {
+    pageAdvance();
+    return;
+  }
+#endif
+  goIdle();
+}
+
+// ── 터치 (남는 GPIO 하나) ─────────────────────────────────────────
+// 켤 때 손이 안 닿은 값을 바탕으로 재 두고, 그보다 TOUCH_ON_PCT 넘게 커지면 '닿았다'.
+// 닿는 순간 한 번만 넘긴다 — 손을 대고 있어도 계속 넘어가지 않는다(떼야 다음).
+// 바탕값은 손이 안 닿은 동안 천천히 따라간다 — 습도·온도·케이스를 닫은 뒤로 값이 흘러도
+// 켤 때 잰 값에 묶여 저절로 '닿음' 이 되거나 아예 안 먹는 일이 없게.
+#if TOUCH_ENABLE
+static uint32_t touchBase = 0;  // 손이 안 닿은 값
+static uint32_t touchLast = 0;  // 마지막으로 잰 값('u' 로 본다)
+static bool touchDown = false;
+
+static void touchBegin() {
+  uint64_t sum = 0;
+  // 처음 몇 번은 터치 장치가 막 켜져 높게 나온다 — 버린다(그래도 높으면 touchService 가 바로 내린다)
+  for (int i = 0; i < 8; i++) {
+    touchRead(TOUCH_PIN);
+    delay(5);
+  }
+  for (int i = 0; i < 16; i++) {
+    sum += touchRead(TOUCH_PIN);
+    delay(2);
+  }
+  touchBase = (uint32_t)(sum / 16);
+  Serial.printf("Touch  : GPIO%d · 바탕값 %lu (닿음 +%d%% · 뗌 +%d%%)\n", TOUCH_PIN,
+                (unsigned long)touchBase, TOUCH_ON_PCT, TOUCH_OFF_PCT);
+}
+
+static void touchService() {
+  static uint32_t nextAt = 0;
+  static int over = 0;
+  if ((int32_t)(millis() - nextAt) < 0 || !touchBase) return;
+  nextAt = millis() + TOUCH_POLL_MS;
+
+  const uint32_t v = touchRead(TOUCH_PIN);
+  touchLast = v;
+  const uint32_t on = touchBase + touchBase / 100 * TOUCH_ON_PCT;
+  const uint32_t off = touchBase + touchBase / 100 * TOUCH_OFF_PCT;
+  if (!touchDown) {
+    over = (v > on) ? over + 1 : 0;
+    if (over >= TOUCH_DEBOUNCE_N) {
+      touchDown = true;
+      over = 0;
+      Serial.printf("[터치] 닿음 %lu (바탕 %lu)\n", (unsigned long)v, (unsigned long)touchBase);
+      if (!portalActive()) nextScreen();
+    } else if (v < touchBase) {
+      // 손은 값을 올리기만 한다 — 바탕보다 낮으면 그것이 새 바탕이다. 켠 직후 터치 장치가
+      // 덜 가라앉아 바탕을 높게(62670 — 안정값 16460 의 네 배) 잡은 일이 있었다(2026-11-06).
+      touchBase = v;
+    } else if (v < off) {
+      touchBase += (v - touchBase) / 64;  // 안 닿은 동안 천천히 따라 오른다
+    }
+  } else if (v < off) {
+    touchDown = false;
+  }
+}
+#else
+static void touchBegin() {}
+static void touchService() {}
+#endif
+
 // ── 버튼 (터치 대신) ────────────────────────────────────────────
-// 짧게: 대기 화면으로 · 길게: 설정 다시 받기
+// 짧게: 대기 화면으로 · 길게(1.2초 넘게 쥐었다 떼면): 설정 다시 받기
+// · PORTAL_HOLD_MS(5초) 쥐고 있으면: 와이파이 설정 모드 (2026-11-06)
+//
+// ★ 길게 누름이 **손을 뗄 때** 걸리게 바꿨다. 전에는 1.2초가 되는 순간 걸렸는데, 그러면
+//   5초까지 쥐고 있는 사람도 1.2초에 설정 받기(수백 ms 짜리 https)로 먼저 빨려 들어간다.
+//   1.2초가 되면 화면에 "떼면 설정 받기 · 계속 누르면 와이파이 설정" 을 띄워 갈림길을 알린다.
+// 설정 모드에서는: 짧게 누르면 설정 모드를 걷는다(아는 곳이 하나라도 있을 때만).
 static void buttonService() {
   static bool wasDown = false;
   static uint32_t downAt = 0;
-  static bool longFired = false;
+  static bool hinted = false;
+  static bool holdFired = false;
 
   const bool down = (digitalRead(BTN_PIN) == LOW);
+  const uint32_t held = millis() - downAt;
   if (down && !wasDown) {
     downAt = millis();
-    longFired = false;
+    hinted = holdFired = false;
   }
-  if (down && !longFired && (millis() - downAt) >= LONG_PRESS_MS) {
-    longFired = true;  // 누르는 동안 한 번만
+
+  if (portalActive()) {  // 설정 모드 — 짧게 누르면 걷는다
+    if (!down && wasDown && !holdFired) {
+      if (wifiApCount > 0) {
+        Serial.println("[버튼] 짧게 누름 — 설정 모드를 걷는다");
+        portalStop();
+      } else {
+        Serial.println("[버튼] 아는 와이파이가 없어 설정 모드를 걷지 않는다");
+      }
+    }
+    wasDown = down;
+    return;
+  }
+
+#if PORTAL_ENABLE
+  if (down && !holdFired && held >= PORTAL_HOLD_MS) {
+    holdFired = true;  // 누르는 동안 한 번만
+    wasDown = down;
+    Serial.println("[버튼] 5초 누름 — 와이파이 설정 모드");
+    portalStart("버튼을 5초 눌렀다");
+    return;
+  }
+  if (down && !hinted && held >= LONG_PRESS_MS) {
+    hinted = true;
+    gfx->fillScreen(RGB565_BLACK);
+    drawRing(COL_GOLD);
+    drawUTF8("떼면 설정 다시 받기", 104, PX_NOTE, RGB565_WHITE);
+    drawUTF8("계속 누르면 와이파이 설정", 136, PX_NOTE, COL_GOLD);
+    gfx->flush();
+  }
+  // 쥐고 있는 동안에는 대기 화면 고리가 그 안내를 덮지 않게 다음 그리기를 미룬다
+  if (down && hinted) idleNextAt = millis() + 500;
+  const bool longPress = (!down && wasDown && !holdFired && held >= LONG_PRESS_MS);
+#else
+  const bool longPress = (!down && wasDown && held >= LONG_PRESS_MS);
+#endif
+  if (longPress) {
     Serial.println("[버튼] 길게 누름 — 설정 다시 받기");
     drawStatus("설정 다시 받는 중");
     soundSay(SND_CONFIG);
     fetchConfig();
     goIdle();
-  }
-  if (!down && wasDown && !longFired) {
+  } else if (!down && wasDown && !holdFired && held < LONG_PRESS_MS) {
     Serial.println("[버튼] 짧게 누름");
-    goIdle();
+    nextScreen();
   }
   wasDown = down;
 }
 
 void setup() {
+  // 받기 버퍼를 늘린다 — 기본 256바이트라, 시리얼로 넣는 알림 JSON 한 줄(허브와 같은 글자 ·
+  // 기분까지 실으면 270바이트를 넘는다)이 loop 가 다른 일을 하는 동안 넘쳐 통째로 사라졌다.
+  Serial.setRxBufferSize(1024);
   Serial.begin(115200);
   // ★ 시리얼 쓰기를 기다리지 않게 한다 — 이것이 없으면 **기기가 2초씩 멈춘다**.
   // 이 보드는 내장 USB-Serial/JTAG 로 Serial 을 낸다(ARDUINO_USB_CDC_ON_BOOT=1).
@@ -2019,19 +2564,21 @@ void setup() {
   Serial.println("Led    : 꺼 둠 (LED_ENABLE 0)");
 #endif
 
-  gfxLock = xSemaphoreCreateMutex();
   uidLock = xSemaphoreCreateMutex();
   pinMode(BTN_PIN, INPUT_PULLUP);
+  touchBegin();  // 바탕값을 잰다 — 켜는 순간 터치 자리에 손을 대고 있지 말 것
 
 #if PHOTO_ENABLE
-  // 이름표는 PSRAM 에 둔다(400칸 = 약 41KB). 내부 RAM 은 화면 버퍼·TLS·WebSocket 이
+  // 이름표는 PSRAM 에 둔다(400칸 = 약 51KB). 내부 RAM 은 화면 버퍼·TLS·WebSocket 이
   // 나눠 쓰므로 이만한 덩이를 여기서 빼지 않는다.
-  roster = (RosterRow *)ps_malloc(sizeof(RosterRow) * MAX_ROSTER);
+  roster = (RosterRow *)ps_calloc(MAX_ROSTER, sizeof(RosterRow));
   if (!roster) roster = (RosterRow *)malloc(sizeof(RosterRow) * MAX_ROSTER);
   Serial.printf("Roster : %d칸 %s (%u bytes)\n", MAX_ROSTER, roster ? "확보" : "실패",
                 (unsigned)(sizeof(RosterRow) * MAX_ROSTER));
 #if PHOTO_CACHE_MAX > 0
-  // 칸은 필요할 때 한 장씩 잡는다 — 여기서는 얼마나 쓸 수 있는지만 알린다.
+  // 칸 표만 여기서 잡는다(PSRAM). 사진 칸은 필요할 때 한 장씩 잡는다.
+  photoCache = (PhotoCacheEntry *)ps_calloc(PHOTO_CACHE_MAX, sizeof(PhotoCacheEntry));
+  if (!photoCache) Serial.println("Photo  : 캐시 칸 표를 못 잡았다 — 캐시 없이 돈다");
   Serial.printf("Photo  : 캐시 최대 %d장 x %u KB = %u KB · 지금 PSRAM %lu KB\n", PHOTO_CACHE_MAX,
                 (unsigned)(PHOTO_BYTES / 1024),
                 (unsigned)((size_t)PHOTO_CACHE_MAX * PHOTO_BYTES / 1024),
@@ -2055,15 +2602,12 @@ void setup() {
   // begin() 은 끝에서 화면을 켜므로(DISPON) 여기서 다시 끄고, 검게 칠한 뒤 켠다.
   // ★ 라이브러리의 displayOff() 를 쓰지 않는 까닭: 그것은 화면 끄기(0x28)가 아니라
   //   잠자기(SLPIN)여서 끄고 켜는 데 120ms+120ms 를 기다린다. 여기서 바라는 것은
-  //   '지금은 내보내지 말라' 한 마디뿐이다.
+  //   '지금은 내보내지 말라' 한 마디뿐이다.워1
   bus->sendCommand(GC9A01_DISPOFF);
   gfx->fillScreen(RGB565_BLACK);
   gfx->flush();
   bus->sendCommand(GC9A01_DISPON);
   backlightOn(cfgBacklight);
-
-  // 고리를 돌릴 일꾼. 서버 왕복이 loop 를 붙잡고 있는 동안에도 돌아간다.
-  xTaskCreate(spinnerTask, "spinner", 4096, nullptr, 1, nullptr);
 
   drawStatus("PN532 준비 중");
 #if SOUND_SAY_BOOT
@@ -2103,21 +2647,29 @@ void setup() {
     Serial.println("ERROR: PN532 를 찾을 수 없습니다");
     Serial.println("  - 모듈 모드 스위치가 SPI 인지 확인 (SEL0=OFF, SEL1=ON)");
     Serial.println("  - MISO/MOSI 가 서로 바뀌지 않았는지 확인");
+#if PN532_OPTIONAL
+    // 리더 없이 화면만 시험할 때(config.h 의 PN532_OPTIONAL) — 서지 않고 이어 간다.
+    // 허브·ws 로 오는 알림은 그대로 뜬다. 카드만 못 읽는다.
+    Serial.println("  PN532_OPTIONAL — 리더 없이 이어 간다(카드는 못 읽는다)");
+#else
     drawFatal("PN532", "찾을 수 없음");
     ledBase(LED_FATAL);
     soundSay(SND_READER_FAIL);
     while (true) {
       soundPump(1000);
     }
+#endif
   }
-  Serial.printf("PN532 found: chip PN5%02X, firmware %d.%d\n", (ver >> 24) & 0xFF,
-                (ver >> 16) & 0xFF, (ver >> 8) & 0xFF);
+  if (ver) {
+    Serial.printf("PN532 found: chip PN5%02X, firmware %d.%d\n", (ver >> 24) & 0xFF,
+                  (ver >> 16) & 0xFF, (ver >> 8) & 0xFF);
 
-  nfc.SAMConfig();
-  nfc.setPassiveActivationRetries(1);  // 카드가 없을 때 빨리 포기하도록
+    nfc.SAMConfig();
+    nfc.setPassiveActivationRetries(1);  // 카드가 없을 때 빨리 포기하도록
 
-  // 카드 스캔은 전용 일꾼에게 맡긴다(위 nfcTask 주석). 반드시 PN532 가 선 뒤에 올린다.
-  xTaskCreatePinnedToCore(nfcTask, "nfc", 4096, nullptr, 1, &nfcTaskHandle, 0);
+    // 카드 스캔은 전용 일꾼에게 맡긴다(위 nfcTask 주석). 반드시 PN532 가 선 뒤에 올린다.
+    xTaskCreatePinnedToCore(nfcTask, "nfc", 4096, nullptr, 1, &nfcTaskHandle, 0);
+  }
 
   // 와이파이가 NVS 에 쓰지 않게 막는다 — 플래시에 쓰는 동안 캐시가 꺼져 화면·SPI 가
   // 늘어진다(참고 기기에서는 RGB 패널 그림이 쓸렸다).
@@ -2151,6 +2703,15 @@ void setup() {
   // (슬립을 꺼도 남고, 같은 2초 간격 ping 은 7ms 다). 기기가 **답하는** 쪽에 있는 별개의
   // 건이라 hub 로 밀려 들어오는 길에는 영향이 없다. 2초 간격으로 재다가 헷갈리지 말 것.
   WiFi.setSleep(false);
+  credsLoad();  // 아는 와이파이 목록 — 폰으로 넣은 것(NVS)
+#if PORTAL_ENABLE
+  // 아는 와이파이가 하나도 없다 = 처음 켠 기기다. 붙어 볼 곳이 없으니 곧바로 QR 을 띄운다.
+  if (wifiApCount == 0) {
+    portalStart("아는 와이파이가 없다 — 처음 켰다");
+    Serial.printf("Ready. free heap %lu\n", (unsigned long)ESP.getFreeHeap());
+    return;
+  }
+#endif
   drawStatus("WiFi 붙는 중");
 #if SOUND_SAY_BOOT
   // ★ soundSay() 가 아니라 **이어 세우는** 쪽이다. 위에서 세운 '리더 준비 중' 이 아직
@@ -2160,13 +2721,51 @@ void setup() {
 #endif
 
   Serial.printf("Ready. free heap %lu\n", (unsigned long)ESP.getFreeHeap());
+  memReportAll();  // 켠 직후의 바탕값 — 이것과 견줘 무엇이 얼마나 먹는지 본다
 }
 
 void loop() {
+  memService();   // 메모리 한 줄(MEM_LOG_MS 마다)
   // 카드 스캔은 여기 없다 — 전용 일꾼(nfcTask)이 돈다. 읽은 UID 는 pendingUid 로 넘어온다.
   soundLoop();    // 다 읽은 토막 다음 것을 밀어 넣는다(기다리지 않는다)
   ledLoop();      // 깜빡임을 돌리고, 잠깐 켜 둔 색이 지났으면 바탕으로 되돌린다
+
+  // ── 설정 모드일 때 ─────────────────────────────────────────────
+  // 그동안에는 와이파이·태깅 일을 모두 쉰다 — 라디오를 저쪽(AP·DNS·웹)이 쓰고, 공유기에
+  // 붙어 있지 않아 서버에 물을 수도 없다. 읽힌 카드는 쌓이지 않게 그때그때 버린다.
+  // 시리얼은 세 글자만 받는다: 'r' 다시 세우기 · 'w' 설정 모드 걷기 · 'W' 넣은 와이파이 지우기.
+  if (portalActive()) {
+    portalService();
+    char drop[32];
+    takePendingUid(drop, sizeof(drop));
+    buttonService();  // 짧게 누르면 설정 모드를 걷는다(아래 buttonService)
+    while (Serial.available()) {
+      const int c = Serial.read();
+      if (c == 'r' || c == 'R') {
+        Serial.println("[명령] 재부팅합니다...");
+        Serial.flush();
+        ESP.restart();
+      } else if (c == 'w') {
+        portalStop();
+      } else if (c == 'W') {
+        credsClear();
+      }
+    }
+    delay(5);
+    return;
+  }
+
   wifiService();  // 와이파이 — 붙어 있으면 아무 일도 하지 않는다
+
+#if PORTAL_ENABLE
+  // 아는 와이파이에 아예 못 붙으면 설정 모드로 — 새 교회에 가져다 켠 자리다.
+  // **한 번이라도 붙었던 뒤에는 들어가지 않는다**: 공유기를 잠깐 껐을 때 기기가 설정 모드로
+  // 달아나면 안 된다(돌아오면 wifiService 가 혼자 다시 붙는다).
+  if (PORTAL_AUTO_ROUNDS && !wifiEverOnline && wifiNoApRounds >= PORTAL_AUTO_ROUNDS) {
+    portalStart("아는 와이파이에 붙지 못했다");
+    return;
+  }
+#endif
 
   // 붙거나 끊기는 순간에만 다시 그린다(매번 그리면 화면이 깜빡인다)
   const bool nowOnline = (WiFi.status() == WL_CONNECTED);
@@ -2177,7 +2776,10 @@ void loop() {
                     WiFi.localIP().toString().c_str(), WiFi.RSSI());
       startServers();  // 붙은 뒤에 mDNS·WebSocket 을 켠다
       fetchConfig();   // 밝기·출석모드를 받아 온다(못 받으면 들고 있던 값으로 돈다)
-      fetchRoster();   // UID→사진 이름. 사진 자체는 태깅할 때 한 장씩 받는다
+      fetchRoster();   // UID→사진 이름. 사진 자체는 대기 중에 한 장씩 미리 받는다
+      // 홈 위 띠의 시각 — 기기에 시계가 없어 NTP 로 맞춘다(기다리지 않는다. 맞으면 다음 분에 뜬다)
+      configTzTime("KST-9", "pool.ntp.org", "time.google.com");
+      summaryWanted = true;  // 홈 숫자 — 아래 loop 가 대기 화면일 때 받는다
     } else {
       Serial.println("[와이파이] 끊김");
     }
@@ -2204,8 +2806,12 @@ void loop() {
   char uidLog[72];
   if (takePendingUid(uid, sizeof(uid), uidLog, sizeof(uidLog))) {
     if (uidLog[0]) Serial.println(uidLog);  // 리더가 읽은 줄 — 찍는 자리는 여기뿐이다
-    processTag(uid);
+    processTag(uid);  // 서버와 주고받기만 — 화면은 아래 presentNfc 가
   }
+
+  // 정해 둔 NFC 화면을 그린다 — 태그(processTag)든 허브·ws 로 밀려온 알림이든 여기 하나로
+  // 온다. 사진이 캐시에 없으면 먼저 받고, **받기가 다 끝난 뒤** 한 장을 그린다.
+  if (nfcPresentWanted) presentNfc();
 
   // 설정 다시 받기 — 주기(5분)가 됐거나, 관리 화면이 "지금 받아라" 를 밀었을 때.
   // 민 쪽이 있으면 그 자리에서 받으므로 밝기·출석모드가 누른 즉시 바뀐다.
@@ -2216,13 +2822,67 @@ void loop() {
 
   // 이름표 다시 받기 — 아이가 사진을 바꾸면 img 이름이 달라져 이때 반영된다.
   // NFC·일괄 화면을 띄우고 있을 때는 미룬다(받는 동안 loop 가 멈춰 화면이 굳는다).
-  if (online && mode == MODE_IDLE && (int32_t)(millis() - rosterNextAt) >= 0) fetchRoster();
+  if (online && mode == MODE_IDLE && (rosterWanted || (int32_t)(millis() - rosterNextAt) >= 0)) {
+    rosterWanted = false;
+    fetchRoster();
+  }
+
+  // 홈 숫자 다시 받기 — 주기(SUMMARY_TTL_MS)거나 포인트가 바뀐 뒤(summaryWanted).
+  // 대기 화면일 때만, 다음 태그가 기다리지 않을 때만. 받은 뒤 다시 그리는 것은 drawIdle 이
+  // 서명으로 알아서 한다(받는 일과 그리는 일은 같은 loop 에서 차례로 돈다).
+  if (online && mode == MODE_IDLE && !pendingUidWaiting() &&
+      (summaryWanted || (int32_t)(millis() - summaryNextAt) >= 0)) {
+    if (summaryWanted) boardWanted = true;  // 포인트가 바뀌었다 — 순위·최근 내역도 바뀌었다
+    summaryWanted = false;
+    fetchSummary();
+  }
+
+#if PAGES_ENABLE
+  // 대기 화면 네 장의 알림판 — 홈 숫자와 같은 자리 · 같은 조건(대기 화면 · 다음 태그 없음).
+  // 홈 숫자를 받은 같은 바퀴에 이어 받지 않고 다음 바퀴로 미룬다 — 그 사이 태그가 오면 먼저 받는다.
+  else if (online && mode == MODE_IDLE && !pendingUidWaiting() &&
+           (boardWanted || (int32_t)(millis() - boardNextAt) >= 0)) {
+    boardWanted = false;
+    fetchBoard();
+  }
+
+  // 대기 화면 넘기기 — 단추를 쥐고 있는 동안은(길게 누름 안내를 띄웠다) 넘기지 않는다
+  if (mode == MODE_IDLE && (int32_t)(millis() - pageNextAt) >= 0) {
+    if (digitalRead(BTN_PIN) == LOW)
+      pageNextAt = millis() + 500;
+    else
+      pageAdvance();
+  }
+#endif
 
   buttonService();
+  touchService();
 
   // 시리얼 명령 — 한 글자씩(줄바꿈은 무시)
   while (Serial.available()) {
     const int c = Serial.read();
+    // '{' 로 시작하는 한 줄은 **알림 JSON** 이다 — ws·허브로 오는 것과 똑같이 handleCommand 로 간다.
+    // 망 없이(핫스팟이 맥과 기기에 같은 주소를 주는 일이 있었다) 허브 알림 화면을 시험하려는 길:
+    //   {"uid":"S012","name":"오이안","points":36,"note":"+5P 찬양 율동","category":"특별 미션","reason":"찬양 율동"}
+    if (c == '{') {
+      static char line[512];
+      size_t n = 0;
+      line[n++] = '{';
+      const uint32_t until = millis() + 500;  // 한 줄이 다 올 때까지 잠깐 기다린다
+      while ((int32_t)(millis() - until) < 0 && n < sizeof(line) - 1) {
+        const int ch = Serial.read();
+        if (ch < 0) {
+          delay(1);
+          continue;
+        }
+        if (ch == '\n' || ch == '\r') break;
+        line[n++] = (char)ch;
+      }
+      line[n] = '\0';
+      Serial.printf("[시리얼] 알림: %s\n", line);
+      handleCommand(line, n);
+      continue;
+    }
     switch (c) {
       case 'h':
       case 'H':
@@ -2230,6 +2890,29 @@ void loop() {
       case 'N':
         Serial.println("[명령] 대기 화면");
         goIdle();
+        break;
+      case 'g':
+      case 'G':
+        // 대기 화면 다음 장 — 받은 것이 없는 장은 건너뛴다('k' 처럼 시험 숫자를 넣지 않는다)
+        if (mode != MODE_IDLE) goIdle();
+        pageAdvance();
+        Serial.printf("[명령] 대기 화면 %d/%d 장\n", idlePage + 1, PAGE_COUNT);
+        break;
+      case 'u':
+      case 'U':
+#if TOUCH_ENABLE
+        Serial.printf("[터치] GPIO%d · 지금 %lu · 바탕 %lu (+%ld%%) · 닿음 기준 +%d%% · %s\n", TOUCH_PIN,
+                      (unsigned long)touchLast, (unsigned long)touchBase,
+                      touchBase ? ((long)touchLast - (long)touchBase) * 100 / (long)touchBase : 0L,
+                      TOUCH_ON_PCT, touchDown ? "닿아 있음" : "떨어져 있음");
+#else
+        Serial.println("[터치] 꺼 둠 (TOUCH_ENABLE 0)");
+#endif
+        break;
+      case 'b':
+      case 'B':
+        Serial.println("[명령] 알림판 다시 받기");
+        fetchBoard();
         break;
       case 'c':
       case 'C':
@@ -2272,12 +2955,45 @@ void loop() {
                                                  sizeof(StackType_t))
                                     : 0u);
         break;
+      case 'm':
+      case 'M':
+        memReportAll();
+        break;
+      // 화면 버퍼를 통째로 시리얼로 — 맥에서 PNG 로 바꿔 눈으로 본다(화면을 못 보는 자리에서).
+      // '<<FB 240 240>>' 줄 뒤에 RGB565(리틀엔디안) 115,200바이트, 그 뒤 '<<END>>'.
+      // ★ 평소 Serial 은 버퍼가 차면 버린다(setTxTimeoutMs(0)) — 여기서는 자리가 날 때까지
+      //   기다렸다 쓴다. 버리면 그림이 밀려 깨진다.
+      case 'p': {
+        uint16_t *fb = gfx->getFramebuffer();
+        if (!fb) break;
+        Serial.print("\n<<FB 240 240>>\n");
+        const uint8_t *b = (const uint8_t *)fb;
+        const size_t n = (size_t)240 * 240 * 2;
+        for (size_t o = 0; o < n;) {
+          const int room = Serial.availableForWrite();
+          if (room <= 0) {
+            delay(1);
+            continue;
+          }
+          const size_t k = (n - o < (size_t)room) ? n - o : (size_t)room;
+          o += Serial.write(b + o, k);
+        }
+        Serial.print("\n<<END>>\n");
+        break;
+      }
+      // 홈 화면 시험 숫자 — 서버의 /summary 없이 배치를 본다(다음에 받으면 진짜 값으로 바뀐다)
+      case 'k':
+        homeData = {true, 72, 496, 0, 0};
+        Serial.println("[홈] 시험 숫자 — 등록 72 · 총 496 · 오늘 +0 / -0");
+        drawIdle();
+        break;
       case 'f':
       case 'F':
         Serial.println("[명령] 이름표 다시 받기");
         fetchRoster();
         for (int i = 0; i < rosterCount; i++) {
-          Serial.printf("  %-16s %s\n", roster[i].uid, roster[i].img);
+          Serial.printf("  %-16s %-8s %s\n", roster[i].uid[0] ? roster[i].uid : "-", roster[i].sid,
+                        roster[i].img);
         }
         break;
       // 이름표의 아이를 차례로 하나 골라 **실제 서버로** 조회·사진 받기를 해 본다.
@@ -2289,9 +3005,11 @@ void loop() {
         } else {
           static int demoIdx = 0;
           demoIdx %= rosterCount;
-          Serial.printf("[시연] %d/%d  %s\n", demoIdx + 1, rosterCount, roster[demoIdx].uid);
-          processTag(roster[demoIdx].uid);
-          nfcUntil = millis() + 30000;  // 들여다볼 시간을 준다
+          // 카드 없는 아이는 학번으로 묻는다(카드가 있어야 출석 지급은 된다)
+          const char *key = roster[demoIdx].uid[0] ? roster[demoIdx].uid : roster[demoIdx].sid;
+          Serial.printf("[시연] %d/%d  %s\n", demoIdx + 1, rosterCount, key);
+          processTag(key);
+          nfcHoldMs = 30000;  // 들여다볼 시간을 준다(presentNfc 가 그린 때부터)
           demoIdx++;
         }
         break;
@@ -2312,14 +3030,6 @@ void loop() {
       case 'T':
         showTestScreen();
         break;
-      case 'g':
-      case 'G':
-        Serial.println("[명령] 불러오는 중 고리 3초");
-        spinStart();
-        delay(3000);  // delay 는 쉬는 것이라 그동안 일꾼이 돈다
-        spinStop();
-        goIdle();
-        break;
       // 스피커·SD·번호를 눈이 아니라 귀로 확인한다. 한 번 누를 때마다 다음 토막.
       case 'v':
       case 'V':
@@ -2332,7 +3042,14 @@ void loop() {
         ledTestNext();
         break;
       case 'w':
+        portalStart("시리얼 명령");
+        return;  // 설정 모드 — 이 바퀴는 여기서 접는다
       case 'W':
+        credsClear();
+        Serial.println("[명령] 다시 세우면 반영됩니다");
+        break;
+      case 'j':
+      case 'J':
         Serial.println("[명령] 와이파이 다시 붙기");
         wifiTried = false;
         WiFi.disconnect();
@@ -2344,9 +3061,10 @@ void loop() {
         ESP.restart();
         break;
       case '?':
-        Serial.println("[명령] h 대기 · c 설정 받기 · f 이름표 받기+목록 · d 실제 조회 시연 · "
-                       "i 상태 · s 출석 목록 · x 사진 캐시 비우기 · t 시험 화면 · g 고리 · "
-                       "v 소리 토막 · l 상태 불 · w 와이파이 다시 · r 재부팅");
+        Serial.println("[명령] h 대기 · g 대기 다음 장 · u 터치 값 · b 알림판 받기 · c 설정 받기 · f 이름표 받기+목록 · d 실제 조회 시연 · "
+                       "i 상태 · m 메모리 전부 · s 출석 목록 · x 사진 캐시 비우기 · t 시험 화면 · "
+                       "v 소리 토막 · l 상태 불 · w 와이파이 설정 모드 · W 넣은 와이파이 지우기 · "
+                       "j 와이파이 다시 붙기 · r 재부팅");
         break;
       default:
         break;
@@ -2360,14 +3078,19 @@ void loop() {
   if (online && mode == MODE_IDLE && (int32_t)(millis() - httpWarmAt) >= 0) httpWarm();
 
 #if PHOTO_CACHE_MAX > 0
-  // 사진 미리 받아 두기 — 이름표를 받은 뒤 한 장씩 캐시에 채운다. 태깅할 때 받으면 그
-  // 아이가 사진을 기다리지만(재 보니 ~800ms), 미리 받아 두면 캐시에서 바로 깔린다.
-  // 아이가 열 명인데 캐시가 60칸이라 전원이 들어간다.
+  // 사진 미리 받아 두기 — 이름표를 받은 뒤 한 장씩 캐시에 채운다. 줄여 담으면 한 장이 18KB 라
+  // 캐시(PHOTO_CACHE_MAX · 200장)에 한 교회 전원이 들어간다. 태깅할 때는 받지 않고 바로 깔린다.
+  // 한 장 받는 데 0.3초쯤(원본 115KB) — 그동안 대기 화면 고리가 멈춰 있다 돈다.
   // ★ 대기 화면일 때 한 번에 한 장만 — 받는 동안 loop 가 멈추므로 길게 붙잡지 않는다.
-  if (online && mode == MODE_IDLE && !pendingUidWaiting() && photoPrefetchIdx < rosterCount) {
+  //   받는 것과 대기 화면 그리기는 같은 loop 에서 차례로 돌아 겹치지 않는다.
+  if (online && mode == MODE_IDLE && !pendingUidWaiting() && !nfcPresentWanted &&
+      photoPrefetchIdx < rosterCount) {
     const int i = photoPrefetchIdx++;
-    if (!photoCacheGet(roster[i].img)) loadPhoto(roster[i].img, false);
-    if (photoPrefetchIdx >= rosterCount) Serial.printf("[사진] 미리 받기 끝 (%d명)\n", rosterCount);
+    if (!photoCacheGet(roster[i].img)) photoGet(roster[i].img, false);
+    if (photoPrefetchIdx >= rosterCount) {
+      Serial.printf("[사진] 미리 받기 끝 (%d명)\n", rosterCount);
+      memLine();  // 사진을 다 담은 뒤의 PSRAM
+    }
   }
 #endif
 
@@ -2375,5 +3098,5 @@ void loop() {
   // 전에는 루프마다 그렸다. drawIdle() 은 화면을 통째로 다시 그리고 115,200바이트를
   // 패널로 밀어 넣어 그만큼 루프가 길어졌다(그래서 밖에서 보낸 것에 답하는 데까지
   // 55ms 단위로 끊겼다).
-  if (mode == MODE_IDLE && (int32_t)(millis() - idleNextAt) >= 0) drawIdle();
+  if (mode == MODE_IDLE && (int32_t)(millis() - idleNextAt) >= 0) drawIdle(false);
 }

@@ -186,7 +186,9 @@ void ledReport() {
 
 #else  // LED_ENABLE 0 — 불 없이 구울 때. 부르는 자리를 그대로 두고 아무 일도 안 한다.
 
-void ledBegin() {}
+// 켤 때 **한 번만** 검정을 보낸다. WS2812 는 마지막으로 받은 색을 전원이 꺼질 때까지 쥐고
+// 있어서, 핀을 아예 안 건드리면 리셋·굽기 뒤에도 앞 펌웨어가 켜 둔 색이 그대로 남는다.
+void ledBegin() { rgbLedWrite(LED_PIN, 0, 0, 0); }
 void ledLoop() {}
 void ledBase(uint8_t) {}
 void ledBusy(bool) {}
