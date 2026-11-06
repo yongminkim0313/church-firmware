@@ -18,7 +18,12 @@
 
 #include <Preferences.h>
 
-#define WIFI_NVS_NS      "nfcwifi"   // NVS 칸 이름(와이파이만 쓴다)
+#ifndef WIFI_NVS_NS
+#define WIFI_NVS_NS      "nfcwifi"   // NVS 칸 이름(와이파이만 쓴다) — config.h 에서 정한다
+#endif
+#ifndef WIFI_USE_BUILTIN
+#define WIFI_USE_BUILTIN 1
+#endif
 #define WIFI_SAVED_MAX   4           // 폰으로 적어 넣은 것을 이만큼 들고 있는다
 
 // SSID 는 32바이트까지, WPA2 비밀번호는 63자까지다(+ 끝 글자 한 자리).
@@ -62,10 +67,12 @@ static void credsLoad() {
     nv.end();
   }
 
+#if WIFI_USE_BUILTIN
   wifiApAdd(WIFI_SSID_0, WIFI_PASS_0);
   wifiApAdd(WIFI_SSID_1, WIFI_PASS_1);
   wifiApAdd(WIFI_SSID_2, WIFI_PASS_2);
   wifiApAdd(WIFI_SSID_3, WIFI_PASS_3);
+#endif
 
   Serial.printf("[와이파이] 아는 곳 %d곳 (폰으로 넣은 것 %d · 구울 때 넣은 것 %d)\n",
                 wifiApCount, wifiSavedCount, wifiApCount - wifiSavedCount);

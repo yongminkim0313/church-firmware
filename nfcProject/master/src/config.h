@@ -10,6 +10,15 @@
 // 들어오는 길은 platformio.ini 의 build_flags = -I ... 다(없으면 여기서 멈춘다).
 #include <ChurchSecrets.h>
 
+// 다른 교회(시험용 등)의 기기 키로 잠깐 굽고 싶을 때 — **깃에 적지 않고** 빌드할 때만 넣는다:
+//   PLATFORMIO_BUILD_FLAGS='-DTALENT_DEVICE_KEY_OVERRIDE=\"<키>\"' pio run -t upload
+// 넣지 않으면 위 공용 파일의 키 그대로다. 그 교회의 명단·사진·설정이 통째로 그쪽 것이 된다.
+// (funfunFirmware/src/config.h 와 같은 길이다)
+#ifdef TALENT_DEVICE_KEY_OVERRIDE
+#undef TALENT_DEVICE_KEY
+#define TALENT_DEVICE_KEY TALENT_DEVICE_KEY_OVERRIDE
+#endif
+
 // ── mDNS ──────────────────────────────────────────────────────────
 // 붙은 뒤 http/ws 로 이 이름으로 찾을 수 있다: nfc-display.local
 // (같은 망의 PC·폰에서 IP 를 몰라도 이 이름으로 접속된다)
@@ -166,6 +175,14 @@
 //   닿아 있는지만 봤다. SD 를 훑고 화면을 세우는 데 그만큼 걸리기 때문인데, 꽂자마자
 //   눌렀다 뗀 손은 늘 그 순간을 빗나갔다. 이제 창이 열려 있는 동안 아무 때나 누르면 된다.
 #define PORTAL_BOOT_WINDOW_MS 10000
+// 구울 때 넣은 와이파이(ChurchSecrets.h 의 WIFI_SSID_0~3)를 쓰나 (2026-11-05)
+// 0 = 쓰지 않는다 — **폰으로 넣은 것만** 안다. 그래서 처음 켜면(아는 곳이 하나도 없으면)
+// 곧바로 설정 모드가 열려 화면에 QR 이 뜬다. 1 로 두면 예전처럼 네 벌을 뒤에 붙인다.
+#define WIFI_USE_BUILTIN 0
+// 폰으로 넣은 와이파이를 적는 NVS 칸 이름. 이름을 바꾸면 **예전에 넣어 둔 것은 안 본다**
+// (지우지는 않는다 — 옛 이름으로 돌려 구우면 되살아난다). 2026-11-05 에 'nfcwifi' 에서
+// 바꿨다 — 기존 와이파이를 모두 잊고 QR 설정부터 다시 하려고.
+#define WIFI_NVS_NS "nfcwifi2"
 
 // ── 소리 — 스피커는 리더에 있다 (2026-10-21) ──────────────────────
 // funfunFirmware 처럼 한국어로 말을 한다("출석 완료 오 포인트"·"잔여 포인트 백이십오").

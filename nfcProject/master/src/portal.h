@@ -491,8 +491,11 @@ static void portalService() {
     ESP.restart();
   }
 
-  // 저절로 닫기 — 폰이 붙어 있는 동안에는 세지 않는다
-  if (WiFi.softAPgetStationNum() > 0) portalQuietAt = 0;
+  // 저절로 닫기 — 폰이 붙어 있는 동안에는 세지 않는다.
+  // 아는 와이파이가 하나도 없으면 닫지 않는다 — 닫아 봐야 붙을 곳이 없어 헛돌다가
+  // 다시 들어올 뿐이고, 그 사이 QR 이 사라져 처음 켠 사람이 기다리게 된다.
+  if (wifiApCount == 0) portalQuietAt = 0;
+  else if (WiFi.softAPgetStationNum() > 0) portalQuietAt = 0;
   else if (!portalQuietAt)            portalQuietAt = millis();
   if (portalTry != PT_OK && portalQuietAt && millis() - portalQuietAt >= PORTAL_IDLE_MS) {
     Serial.printf("[설정] %lu분 동안 아무도 붙지 않았다\n", (unsigned long)(PORTAL_IDLE_MS / 60000));

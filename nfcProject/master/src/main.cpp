@@ -207,15 +207,28 @@ enum LinkState { LINK_FAIL, LINK_WAIT, LINK_OK };
 // 밝기가 이깁니다. 서버 스키마(yvServer/talent/talentConfigV2.js)의 기본값과 같게 둘 것.
 #define BL_LEVEL 16              // ← 1(가장 어둡다) … 16(가장 밝다)
 
+// ★ 흔든 횟수는 **지금 단계에서부터** 센다 (2026-11-05 고침).
+//   백라이트 칩은 이미 켜져 있으면 HIGH 를 다시 줘도 16 으로 돌아가지 않고, 흔들 때마다
+//   지금 단계에서 한 칸씩 내려가다 1 다음에 16 으로 돈다. 예전 코드는 늘 '16 에서 시작'
+//   이라고 보고 (16 - level) 번을 흔들었다 — 켤 때 한 번은 맞지만, 서버가 밝기를 바꿔 준
+//   두 번째부터는 엉뚱한 단계에 섰다(4 → 8 로 바꾸면 12 가 된다). 그래서 지금 단계를
+//   들고 있다가 그 차이만큼만 흔든다(LILYGO 예제의 setBrightness 와 같은 셈).
+static uint8_t blNow = 0;                          // 지금 단계(0 = 아직 켜지 않았다)
+
 static void backlightOn(uint8_t level) {
   if (level < 1)  level = 1;
   if (level > 16) level = 16;
-  digitalWrite(PIN_BL, HIGH);                      // 16단계에서 시작
-  delayMicroseconds(30);
-  for (uint8_t i = 0; i < (uint8_t)(16 - level); i++) {
-    digitalWrite(PIN_BL, LOW);                     // 한 번 흔들 때마다 한 단계 어둡게
+  if (blNow == 0) {                                // 꺼져 있던 칩은 켜는 순간 16 이다
+    digitalWrite(PIN_BL, HIGH);
+    delayMicroseconds(30);
+    blNow = 16;
+  }
+  const uint8_t n = (uint8_t)((16 + blNow - level) % 16);
+  for (uint8_t i = 0; i < n; i++) {
+    digitalWrite(PIN_BL, LOW);                     // 한 번 흔들 때마다 한 단계 어둡게(1 다음은 16)
     digitalWrite(PIN_BL, HIGH);
   }
+  blNow = level;
 }
 
 // ── 화면 객체 (v1.0 과 동일한 값) ───────────────────────────────────
@@ -2973,6 +2986,9 @@ void setup() {
   if (PORTAL_BOOT_HOLD_MS)
     Serial.printf("[설정] 지금부터 %.1f초 동안, 화면을 %.1f초 누르고 있으면 설정 모드로 간다\n",
                   PORTAL_BOOT_WINDOW_MS / 1000.0, PORTAL_BOOT_HOLD_MS / 1000.0);
+  // 아는 와이파이가 하나도 없다 = 처음 켠 기기다. 둘러볼 것도 없으니 곧바로 QR 을 띄운다
+  // (WIFI_USE_BUILTIN 0 이면 폰으로 넣은 것만 알므로, 넣기 전에는 늘 여기로 온다).
+  if (wifiApCount == 0) { portalStart("아는 와이파이가 없다 — 처음 켰다"); return; }
 #endif
   wifiService();     // 붙어 보기 시작(기다리지 않는다)
 }
