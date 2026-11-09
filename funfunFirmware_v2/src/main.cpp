@@ -113,11 +113,14 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 #define TFT_SCK 15
 #define TFT_MOSI 16
 
-// 80MHz. 한 화면(240*240*2 = 115,200바이트)을 패널로 밀어 넣는 순수 SPI 시간이
-// 40MHz 의 23.0ms 에서 11.5ms 로 준다 — 대기화면·고리·사진이 모두 이 길을 쓴다.
-// ★ 배선이 길거나 꽂아 쓰는 점퍼선이면 이 속도에서 화면에 잡음이 섞일 수 있다.
-//   그러면 40000000L 로 되돌리면 된다(그 밖에 영향은 없다).
-#define TFT_SPI_HZ 80000000L
+// 40MHz. 한 화면(240*240*2 = 115,200바이트)을 밀어 넣는 순수 SPI 시간은 23.0ms,
+// 목록 굴리기의 창(240x130, 62KB)은 12.5ms 다 — 50ms 마다 한 프레임이라 넉넉하다.
+// ★ 80MHz(11.5ms)로 돌리다 되돌렸다(2026-11-07). 점퍼선으로 이은 판에서 화면이 까맣게
+//   꺼졌다 잠깐 돌아왔다를 되풀이했다 — 펌웨어는 멀쩡히 돌고(리셋 없음) 화면만 그랬다.
+//   목록을 굴리며 SPI 로 밀어 넣는 양이 크게 늘어난 뒤에 드러났다. 그림 바이트가 DC 잡음으로
+//   명령으로 읽히면 0x28(화면 끄기) · 0x29(켜기)가 되는데, 그림에는 이 바이트가 흔하다.
+//   선이 짧은 판(납땜)이면 80000000L 로 올려도 된다.
+#define TFT_SPI_HZ 40000000L
 #define BLK_FREQ 5000
 #define BLK_RES 8
 
@@ -2904,7 +2907,7 @@ void setup() {
   // begin() 은 끝에서 화면을 켜므로(DISPON) 여기서 다시 끄고, 검게 칠한 뒤 켠다.
   // ★ 라이브러리의 displayOff() 를 쓰지 않는 까닭: 그것은 화면 끄기(0x28)가 아니라
   //   잠자기(SLPIN)여서 끄고 켜는 데 120ms+120ms 를 기다린다. 여기서 바라는 것은
-  //   '지금은 내보내지 말라' 한 마디뿐이다.워1
+  //   '지금은 내보내지 말라' 한 마디뿐이다.
   bus->sendCommand(GC9A01_DISPOFF);
   gfx->fillScreen(RGB565_BLACK);
   gfx->flush();
@@ -3274,6 +3277,8 @@ void loop() {
 #if NAME_VOICE_ENABLE && SOUND_ENABLE && VOICE_PACK_ENABLE
         if (packActive)
           Serial.printf("[고정토막] 서버의 판 %s 받는 중 %d/%d\n", packVerSrv, packIdx, packCount);
+        else if (!soundNamesReady())  // 본 고리의 묻기도 이것으로 막혀 있다 — 0초라 찍으면 곧 묻는 줄 안다
+          Serial.println("[고정토막] SD 가 없어 묻지 않는다");
         else
           Serial.printf("[고정토막] 다음에 판을 묻기까지 %ld초\n",
                         (long)max<int32_t>(0, (int32_t)(packCheckAt - millis()) / 1000));
